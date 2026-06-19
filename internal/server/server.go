@@ -24,6 +24,15 @@ import (
 	"github.com/avinashpathak/memcore/internal/value"
 )
 
+// recorder is the slice of metrics the server reports. It is defined here, at
+// the point of consumption, so the metric backend stays replaceable; the
+// metrics package provides the production implementation and tests pass nil.
+type recorder interface {
+	ObserveCommand(name string, d time.Duration, isError bool)
+	ConnectionOpened()
+	ConnectionClosed()
+}
+
 // Server accepts client connections and serves RESP commands. It is safe for
 // concurrent use: each connection runs on its own goroutine, and the only
 // shared mutable state is the databases, each of which locks its own shards.
@@ -32,6 +41,8 @@ type Server struct {
 	clock    clock.Clock
 	log      *slog.Logger
 	registry *command.Registry
+	settings *config.Settings
+	metrics  recorder
 
 	databases  []*shard.DB
 	limits     value.Limits
@@ -54,11 +65,17 @@ func New(cfg config.Config, clk clock.Clock, log *slog.Logger, registry *command
 	for i := range dbs {
 		dbs[i] = shard.New(cfg.Network.Shards, clk)
 	}
+	settings := config.NewSettings(config.Reloadable{
+		SlowThreshold:  cfg.Metrics.SlowThreshold,
+		ExpirySample:   cfg.Expiry.SamplePerShard,
+		SlowLogEnabled: cfg.Metrics.SlowThreshold > 0,
+	})
 	s := &Server{
 		cfg:        cfg.Network,
 		clock:      clk,
 		log:        log,
 		registry:   registry,
+		settings:   settings,
 		databases:  dbs,
 		limits:     cfg.Limits,
 		persistCfg: cfg.Persistence,
@@ -67,13 +84,17 @@ func New(cfg config.Config, clk clock.Clock, log *slog.Logger, registry *command
 	}
 	s.expiry = expiry.New(dbs, clk, expiry.Config{
 		Interval:       cfg.Expiry.Interval,
-		SamplePerShard: cfg.Expiry.SamplePerShard,
+		SamplePerShard: func() int { return settings.Load().ExpirySample },
 	}, log)
 	for _, db := range dbs {
 		db.SetReaper(s.reapAsync)
 	}
 	return s
 }
+
+// SetRecorder installs the metrics recorder. It must be called before Serve.
+// When unset, the server records nothing.
+func (s *Server) SetRecorder(r recorder) { s.metrics = r }
 
 // Listen binds the configured address. Splitting it from Serve lets a caller
 // learn the bound address (useful when the OS chooses the port) before any
@@ -164,7 +185,7 @@ func (s *Server) startConn(nc net.Conn) {
 		nc:      nc,
 		reader:  resp.NewReader(nc),
 		writer:  resp.NewWriter(nc),
-		session: command.NewContext(s.clock, s.databases, s.limits),
+		session: command.NewContext(s.clock, s.databases, s.limits, s.settings),
 	}
 	s.mu.Lock()
 	if s.closing {
@@ -267,7 +288,7 @@ func (s *Server) recover() error {
 		s.databases[rec.DB].Restore(rec.Key, e)
 		return nil
 	}
-	session := command.NewContext(s.clock, s.databases, s.limits)
+	session := command.NewContext(s.clock, s.databases, s.limits, s.settings)
 	replay := func(db int, args [][]byte) error {
 		if err := session.Select(db); err != nil {
 			return err

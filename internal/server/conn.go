@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/avinashpathak/memcore/internal/clock"
@@ -25,6 +26,10 @@ type conn struct {
 
 func (s *Server) serve(c *conn) {
 	defer s.closeConn(c)
+	if s.metrics != nil {
+		s.metrics.ConnectionOpened()
+		defer s.metrics.ConnectionClosed()
+	}
 	remote := c.nc.RemoteAddr().String()
 	s.log.Debug("connection opened", "remote", remote)
 
@@ -38,7 +43,7 @@ func (s *Server) serve(c *conn) {
 			continue // empty inline line
 		}
 
-		reply := s.execute(c, args)
+		reply := s.dispatch(c, args)
 		if err := c.writer.WriteReply(reply); err != nil {
 			return
 		}
@@ -50,6 +55,42 @@ func (s *Server) serve(c *conn) {
 			}
 		}
 	}
+}
+
+// dispatch times one command, records its metrics, and logs it when it crosses
+// the slow-command threshold. The measurement spans lock acquisition and
+// execution, which is what an operator cares about.
+func (s *Server) dispatch(c *conn, args [][]byte) resp.Reply {
+	start := s.clock.Now()
+	reply := s.execute(c, args)
+	elapsed := s.clock.Now().Sub(start)
+
+	name := commandName(args)
+	if s.metrics != nil {
+		s.metrics.ObserveCommand(name, elapsed, reply.IsError())
+	}
+	s.maybeLogSlow(c, name, args, elapsed)
+	return reply
+}
+
+func (s *Server) maybeLogSlow(c *conn, name string, args [][]byte, elapsed time.Duration) {
+	r := c.session.Settings.Load()
+	if !r.SlowLogEnabled || r.SlowThreshold <= 0 || elapsed < r.SlowThreshold {
+		return
+	}
+	s.log.Warn("slow command",
+		"command", name,
+		"args", len(args)-1,
+		"duration", elapsed,
+		"db", c.session.DB(),
+	)
+}
+
+func commandName(args [][]byte) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return strings.ToLower(string(args[0]))
 }
 
 // execute runs one command under the shard locks it needs and recovers from a

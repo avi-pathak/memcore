@@ -31,7 +31,7 @@ func dbWithVolatileKeys(clk *clock.ManualClock, shards, keys int, ttl time.Durat
 func TestCycleEvictsKeysOnlyOnceTheyExpire(t *testing.T) {
 	clk := clock.NewManualClock(time.Unix(0, 0))
 	db := dbWithVolatileKeys(clk, 4, 20, time.Second)
-	r := New([]*shard.DB{db}, clk, Config{Interval: time.Millisecond, SamplePerShard: 100}, discardLogger())
+	r := New([]*shard.DB{db}, clk, Config{Interval: time.Millisecond, SamplePerShard: func() int { return 100 }}, discardLogger())
 
 	if _, evicted := r.cycle(); evicted != 0 {
 		t.Fatalf("cycle before the deadline evicted %d, want 0", evicted)
@@ -46,9 +46,20 @@ func TestCycleRespectsThePerShardBudget(t *testing.T) {
 	clk := clock.NewManualClock(time.Unix(0, 0))
 	db := dbWithVolatileKeys(clk, 1, 10, time.Second) // one shard makes the budget exact
 	clk.Advance(2 * time.Second)
-	r := New([]*shard.DB{db}, clk, Config{Interval: time.Millisecond, SamplePerShard: 3}, discardLogger())
+	r := New([]*shard.DB{db}, clk, Config{Interval: time.Millisecond, SamplePerShard: func() int { return 3 }}, discardLogger())
 
 	if examined, _ := r.cycle(); examined != 3 {
 		t.Fatalf("examined = %d, want the per-shard budget of 3", examined)
+	}
+}
+
+func TestCycleSkipsWhenTheBudgetIsZero(t *testing.T) {
+	clk := clock.NewManualClock(time.Unix(0, 0))
+	db := dbWithVolatileKeys(clk, 1, 5, time.Second)
+	clk.Advance(2 * time.Second)
+	r := New([]*shard.DB{db}, clk, Config{Interval: time.Millisecond, SamplePerShard: func() int { return 0 }}, discardLogger())
+
+	if examined, evicted := r.cycle(); examined != 0 || evicted != 0 {
+		t.Fatalf("examined=%d evicted=%d, want 0 and 0 when the budget is zero", examined, evicted)
 	}
 }

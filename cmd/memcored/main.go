@@ -8,13 +8,16 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/avinashpathak/memcore/internal/clock"
 	"github.com/avinashpathak/memcore/internal/command"
 	"github.com/avinashpathak/memcore/internal/config"
+	"github.com/avinashpathak/memcore/internal/metrics"
 	"github.com/avinashpathak/memcore/internal/server"
 )
 
@@ -43,6 +46,8 @@ func run() error {
 	flag.BoolVar(&cfg.Persistence.Enabled, "persistence", cfg.Persistence.Enabled, "enable on-disk persistence")
 	flag.StringVar(&cfg.Persistence.Dir, "data-dir", cfg.Persistence.Dir, "directory for the snapshot and append log")
 	flag.StringVar(&cfg.Persistence.FSync, "fsync", cfg.Persistence.FSync, "append-log fsync policy: always, everysec, or no")
+	flag.BoolVar(&cfg.Metrics.Enabled, "metrics", cfg.Metrics.Enabled, "expose Prometheus metrics over HTTP")
+	flag.IntVar(&cfg.Metrics.Port, "metrics-port", cfg.Metrics.Port, "port for the Prometheus metrics endpoint")
 	flag.StringVar(&cfg.Log.Format, "log-format", cfg.Log.Format, "log format: text or json")
 	flag.StringVar(&logLevel, "log-level", logLevel, "log level: debug, info, warn, error")
 	flag.Parse()
@@ -67,10 +72,48 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var wg sync.WaitGroup
+	if cfg.Metrics.Enabled {
+		if err := startMetrics(ctx, &wg, cfg.Metrics, srv, logger); err != nil {
+			return err
+		}
+	}
+
 	if err := srv.Run(ctx); err != nil {
 		return err
 	}
+	wg.Wait()
 	logger.Info("shutdown complete")
+	return nil
+}
+
+// startMetrics binds the metrics listener before serving begins, so a bind
+// failure aborts startup rather than surfacing on a background goroutine, and
+// wires the collectors into the server.
+func startMetrics(ctx context.Context, wg *sync.WaitGroup, cfg config.Metrics, srv *server.Server, logger *slog.Logger) error {
+	collectors := metrics.New()
+	srv.SetRecorder(collectors)
+
+	ln, err := net.Listen("tcp", cfg.Addr())
+	if err != nil {
+		return fmt.Errorf("metrics listen on %s: %w", cfg.Addr(), err)
+	}
+	ms := metrics.NewServer(cfg.Addr(), collectors)
+	logger.Info("metrics endpoint listening", "addr", cfg.Addr(), "path", "/metrics")
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := ms.Serve(ln); err != nil {
+			logger.Error("metrics server failed", "error", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		if err := ms.Shutdown(); err != nil {
+			logger.Error("metrics server shutdown failed", "error", err)
+		}
+	}()
 	return nil
 }
 

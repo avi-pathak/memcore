@@ -27,6 +27,7 @@ type Config struct {
 	Limits      value.Limits
 	Expiry      Expiry
 	Persistence Persistence
+	Metrics     Metrics
 	Log         Log
 }
 
@@ -59,6 +60,15 @@ type Persistence struct {
 	CompactEvery time.Duration // append-log compaction interval; 0 disables it
 }
 
+// Metrics configures observability: a Prometheus endpoint and the slow-command
+// log threshold.
+type Metrics struct {
+	Enabled       bool
+	Host          string
+	Port          int
+	SlowThreshold time.Duration // commands at or above this are logged; 0 disables the slow log
+}
+
 // Default returns a valid configuration with conservative defaults. The bind
 // host is loopback on purpose: exposing the listener is an explicit operator
 // decision, not a default. Port 6380 avoids colliding with a local Redis.
@@ -86,6 +96,12 @@ func Default() Config {
 			Dir:          "data",
 			FSync:        "everysec",
 			CompactEvery: 5 * time.Minute,
+		},
+		Metrics: Metrics{
+			Enabled:       false,
+			Host:          "127.0.0.1",
+			Port:          9121,
+			SlowThreshold: 10 * time.Millisecond,
 		},
 		Log: Log{
 			Level:  slog.LevelInfo,
@@ -130,6 +146,12 @@ func (c Config) Validate() error {
 			return fmt.Errorf("%w: fsync policy %q must be \"always\", \"everysec\", or \"no\"", ErrInvalid, c.Persistence.FSync)
 		}
 	}
+	if c.Metrics.Enabled && (c.Metrics.Port < 1 || c.Metrics.Port > 65535) {
+		return fmt.Errorf("%w: metrics port %d out of range 1-65535", ErrInvalid, c.Metrics.Port)
+	}
+	if c.Metrics.SlowThreshold < 0 {
+		return fmt.Errorf("%w: slow-command threshold must not be negative", ErrInvalid)
+	}
 	switch c.Log.Format {
 	case "text", "json":
 	default:
@@ -142,4 +164,9 @@ func (c Config) Validate() error {
 // bracketed correctly.
 func (n Network) Addr() string {
 	return net.JoinHostPort(n.Host, strconv.Itoa(n.Port))
+}
+
+// Addr returns the host:port the metrics endpoint binds.
+func (m Metrics) Addr() string {
+	return net.JoinHostPort(m.Host, strconv.Itoa(m.Port))
 }

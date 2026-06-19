@@ -14,8 +14,11 @@ import (
 
 // Config tunes the active-expiry loop.
 type Config struct {
-	Interval       time.Duration // wall-clock time between cycles
-	SamplePerShard int           // keys examined per shard per cycle; the work budget
+	Interval time.Duration // wall-clock time between cycles
+	// SamplePerShard returns the per-shard work budget for a cycle. It is read
+	// each cycle so an operator can adjust it through CONFIG SET without a
+	// restart. A non-positive return disables that cycle.
+	SamplePerShard func() int
 }
 
 // Runner evicts expired keys from a set of databases on a fixed interval. Run
@@ -34,9 +37,9 @@ func New(dbs []*shard.DB, clk clock.Clock, cfg Config, log *slog.Logger) *Runner
 }
 
 // Run drives active-expiry cycles until ctx is canceled. A non-positive interval
-// or sample budget disables the loop, leaving expiry to the write path.
+// or a nil sample function disables the loop, leaving expiry to the write path.
 func (r *Runner) Run(ctx context.Context) {
-	if r.cfg.Interval <= 0 || r.cfg.SamplePerShard <= 0 {
+	if r.cfg.Interval <= 0 || r.cfg.SamplePerShard == nil {
 		<-ctx.Done()
 		return
 	}
@@ -56,9 +59,13 @@ func (r *Runner) Run(ctx context.Context) {
 // it examined and evicted. It is separate from Run so tests can drive it against
 // a manual clock without waiting on the ticker.
 func (r *Runner) cycle() (examined, evicted int) {
+	limit := r.cfg.SamplePerShard()
+	if limit <= 0 {
+		return 0, 0
+	}
 	now := r.clock.Now()
 	for _, db := range r.dbs {
-		ex, ev := db.ExpireCycle(now, r.cfg.SamplePerShard)
+		ex, ev := db.ExpireCycle(now, limit)
 		examined += ex
 		evicted += ev
 	}

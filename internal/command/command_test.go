@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/avinashpathak/memcore/internal/clock"
+	"github.com/avinashpathak/memcore/internal/config"
 	"github.com/avinashpathak/memcore/internal/resp"
 	"github.com/avinashpathak/memcore/internal/shard"
 	"github.com/avinashpathak/memcore/internal/value"
@@ -22,7 +23,8 @@ func newTestEnvN(databases int) (*Registry, *Context, *clock.ManualClock) {
 	}
 	compact := value.Thresholds{MaxEntries: 128, MaxBytes: 64}
 	limits := value.Limits{List: compact, Hash: compact, Set: compact, ZSet: compact}
-	return NewRegistry(), NewContext(clk, dbs, limits), clk
+	settings := config.NewSettings(config.Reloadable{SlowThreshold: 10 * time.Millisecond, ExpirySample: 20, SlowLogEnabled: true})
+	return NewRegistry(), NewContext(clk, dbs, limits, settings), clk
 }
 
 // run dispatches a command from string arguments and returns its reply.
