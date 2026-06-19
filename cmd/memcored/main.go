@@ -7,12 +7,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/avinashpathak/memcore/internal/clock"
 	"github.com/avinashpathak/memcore/internal/command"
@@ -38,6 +40,7 @@ func main() {
 func run() error {
 	cfg := config.Default()
 
+	var healthcheck bool
 	logLevel := cfg.Log.Level.String()
 	flag.StringVar(&cfg.Network.Host, "host", cfg.Network.Host, "address to bind the listener")
 	flag.IntVar(&cfg.Network.Port, "port", cfg.Network.Port, "port to listen on")
@@ -50,7 +53,12 @@ func run() error {
 	flag.IntVar(&cfg.Metrics.Port, "metrics-port", cfg.Metrics.Port, "port for the Prometheus metrics endpoint")
 	flag.StringVar(&cfg.Log.Format, "log-format", cfg.Log.Format, "log format: text or json")
 	flag.StringVar(&logLevel, "log-level", logLevel, "log level: debug, info, warn, error")
+	flag.BoolVar(&healthcheck, "healthcheck", false, "PING the configured port and exit; used by the container healthcheck")
 	flag.Parse()
+
+	if healthcheck {
+		return ping(cfg.Network.Addr())
+	}
 
 	if err := cfg.Log.Level.UnmarshalText([]byte(logLevel)); err != nil {
 		return fmt.Errorf("log level: %w", err)
@@ -123,4 +131,27 @@ func newLogger(c config.Log) *slog.Logger {
 		return slog.New(slog.NewJSONHandler(os.Stderr, opts))
 	}
 	return slog.New(slog.NewTextHandler(os.Stderr, opts))
+}
+
+// ping connects to addr, issues a RESP PING, and verifies the +PONG reply. It
+// backs the container healthcheck, so it depends on nothing outside the standard
+// library and the running server.
+func ping(addr string) error {
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Write([]byte("*1\r\n$4\r\nPING\r\n")); err != nil {
+		return err
+	}
+	buf := make([]byte, 7) // "+PONG\r\n"
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		return err
+	}
+	if string(buf) != "+PONG\r\n" {
+		return fmt.Errorf("unexpected ping reply %q", buf)
+	}
+	return nil
 }

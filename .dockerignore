@@ -1,0 +1,22 @@
+# Keep the build context minimal: the build needs only the Go sources, modules,
+# and the Makefile. Everything else is noise that would bust the layer cache.
+.git
+.github
+.gitignore
+.gitattributes
+.golangci.yml
+.dockerignore
+Dockerfile
+docker-compose.yml
+LICENSE
+dist/
+bin/
+data/
+*.md
+!README.md
+*_test.go
+testdata/
+*.test
+*.out
+*.prof
+coverage.*

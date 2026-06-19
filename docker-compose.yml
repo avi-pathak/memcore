@@ -1,0 +1,28 @@
+services:
+  memcored:
+    build:
+      context: .
+      args:
+        VERSION: dev
+        COMMIT: local
+    image: memcore/memcored:dev
+    ports:
+      - "6380:6380"
+    volumes:
+      - memcore-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+
+  # Optional smoke check: prove RESP compatibility with a stock redis-cli.
+  # Run with: docker compose --profile smoke up smoke
+  smoke:
+    image: redis:7-alpine
+    profiles: ["smoke"]
+    depends_on:
+      - memcored
+    entrypoint: ["sh", "-c", "redis-cli -h memcored -p 6380 ping"]
+
+volumes:
+  memcore-data:
