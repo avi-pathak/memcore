@@ -11,6 +11,7 @@ import (
 	"net"
 	"runtime"
 	"strconv"
+	"time"
 
 	"github.com/avinashpathak/memcore/internal/value"
 )
@@ -24,6 +25,7 @@ var ErrInvalid = errors.New("config: invalid")
 type Config struct {
 	Network Network
 	Limits  value.Limits
+	Expiry  Expiry
 	Log     Log
 }
 
@@ -39,6 +41,12 @@ type Network struct {
 type Log struct {
 	Level  slog.Level
 	Format string // "text" or "json"
+}
+
+// Expiry tunes the background active-expiry loop.
+type Expiry struct {
+	Interval       time.Duration // time between cycles; 0 disables active expiry
+	SamplePerShard int           // keys examined per shard per cycle
 }
 
 // Default returns a valid configuration with conservative defaults. The bind
@@ -58,6 +66,10 @@ func Default() Config {
 			Hash: compact,
 			Set:  compact,
 			ZSet: compact,
+		},
+		Expiry: Expiry{
+			Interval:       100 * time.Millisecond,
+			SamplePerShard: 20,
 		},
 		Log: Log{
 			Level:  slog.LevelInfo,
@@ -85,6 +97,12 @@ func (c Config) Validate() error {
 		if th.MaxEntries < 0 || th.MaxBytes < 0 {
 			return fmt.Errorf("%w: compact-encoding thresholds must not be negative", ErrInvalid)
 		}
+	}
+	if c.Expiry.Interval < 0 {
+		return fmt.Errorf("%w: expiry interval must not be negative", ErrInvalid)
+	}
+	if c.Expiry.SamplePerShard < 0 {
+		return fmt.Errorf("%w: expiry sample size must not be negative", ErrInvalid)
 	}
 	switch c.Log.Format {
 	case "text", "json":

@@ -15,6 +15,7 @@ import (
 	"github.com/avinashpathak/memcore/internal/clock"
 	"github.com/avinashpathak/memcore/internal/command"
 	"github.com/avinashpathak/memcore/internal/config"
+	"github.com/avinashpathak/memcore/internal/expiry"
 	"github.com/avinashpathak/memcore/internal/resp"
 	"github.com/avinashpathak/memcore/internal/shard"
 	"github.com/avinashpathak/memcore/internal/value"
@@ -31,6 +32,8 @@ type Server struct {
 
 	databases []*shard.DB
 	limits    value.Limits
+	expiry    *expiry.Runner
+	reaper    chan value.Value
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -46,7 +49,7 @@ func New(cfg config.Config, clk clock.Clock, log *slog.Logger, registry *command
 	for i := range dbs {
 		dbs[i] = shard.New(cfg.Network.Shards, clk)
 	}
-	return &Server{
+	s := &Server{
 		cfg:       cfg.Network,
 		clock:     clk,
 		log:       log,
@@ -54,7 +57,16 @@ func New(cfg config.Config, clk clock.Clock, log *slog.Logger, registry *command
 		databases: dbs,
 		limits:    cfg.Limits,
 		conns:     make(map[*conn]struct{}),
+		reaper:    make(chan value.Value, reaperBuffer),
 	}
+	s.expiry = expiry.New(dbs, clk, expiry.Config{
+		Interval:       cfg.Expiry.Interval,
+		SamplePerShard: cfg.Expiry.SamplePerShard,
+	}, log)
+	for _, db := range dbs {
+		db.SetReaper(s.reapAsync)
+	}
+	return s
 }
 
 // Listen binds the configured address. Splitting it from Serve lets a caller
@@ -96,6 +108,10 @@ func (s *Server) Serve(ctx context.Context) error {
 		<-ctx.Done()
 		s.shutdown()
 	}()
+
+	s.wg.Add(2)
+	go func() { defer s.wg.Done(); s.runReaper(ctx) }()
+	go func() { defer s.wg.Done(); s.expiry.Run(ctx) }()
 
 	for {
 		nc, err := ln.Accept()
@@ -175,5 +191,32 @@ func (s *Server) shutdown() {
 	}
 	for c := range s.conns {
 		_ = c.nc.SetReadDeadline(time.Now())
+	}
+}
+
+// reaperBuffer bounds how many freed values may queue for the reaper before
+// UNLINK falls back to dropping them inline.
+const reaperBuffer = 1024
+
+// reapAsync hands v to the background reaper without blocking. If the reaper is
+// busy, v is dropped here and reclaimed by the garbage collector like any other
+// value; correctness never depends on the reaper draining.
+func (s *Server) reapAsync(v value.Value) {
+	select {
+	case s.reaper <- v:
+	default:
+	}
+}
+
+// runReaper drains freed collection values until ctx is canceled. Receiving a
+// value drops the last reference to it, so the garbage collector reclaims it off
+// the command path.
+func (s *Server) runReaper(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.reaper:
+		}
 	}
 }

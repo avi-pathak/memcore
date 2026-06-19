@@ -109,3 +109,61 @@ func allShardsLen(db *DB) int {
 	defer unlock()
 	return db.Len()
 }
+
+func TestExpireCycleEvictsExpiredKeysAcrossShards(t *testing.T) {
+	clk := clock.NewManualClock(time.Unix(0, 0))
+	db := New(8, clk)
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("k%d", i)
+		unlock := db.LockKeys([][]byte{[]byte(key)})
+		db.Set(key, value.MakeString([]byte("v")))
+		db.SetExpire(key, clk.Now().Add(time.Second))
+		unlock()
+	}
+	clk.Advance(2 * time.Second)
+	if _, evicted := db.ExpireCycle(clk.Now(), 1000); evicted != 50 {
+		t.Fatalf("evicted = %d, want 50", evicted)
+	}
+}
+
+func TestUnlinkRoutesCollectionsToTheReaper(t *testing.T) {
+	db := newTestDB(4)
+	reaped := make(chan value.Value, 1)
+	db.SetReaper(func(v value.Value) { reaped <- v })
+
+	l := value.NewList(value.Thresholds{MaxEntries: 128, MaxBytes: 64})
+	l.PushBack([]byte("a"))
+	unlock := db.LockKeys([][]byte{[]byte("k")})
+	db.Set("k", value.MakeList(l))
+	live := db.Unlink("k")
+	unlock()
+
+	if !live {
+		t.Fatal("Unlink reported a live key as not live")
+	}
+	select {
+	case v := <-reaped:
+		if v.Kind() != value.KindList {
+			t.Fatalf("reaped kind = %v, want list", v.Kind())
+		}
+	default:
+		t.Fatal("Unlink did not route the collection to the reaper")
+	}
+}
+
+func TestUnlinkDoesNotReapStrings(t *testing.T) {
+	db := newTestDB(4)
+	reaped := make(chan value.Value, 1)
+	db.SetReaper(func(v value.Value) { reaped <- v })
+
+	unlock := db.LockKeys([][]byte{[]byte("k")})
+	db.Set("k", value.MakeString([]byte("v")))
+	db.Unlink("k")
+	unlock()
+
+	select {
+	case <-reaped:
+		t.Fatal("Unlink reaped a string; only collections should be reaped")
+	default:
+	}
+}

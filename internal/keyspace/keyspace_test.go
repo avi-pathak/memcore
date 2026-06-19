@@ -1,6 +1,7 @@
 package keyspace
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -141,5 +142,62 @@ func TestFlushEmptiesTheKeyspace(t *testing.T) {
 	ks.Flush()
 	if n := ks.Len(); n != 0 {
 		t.Fatalf("Len = %d, want 0 after Flush", n)
+	}
+}
+
+func TestSampleExpiredEvictsOnlyExpiredVolatileKeys(t *testing.T) {
+	ks, clk := newTestKeyspace()
+	ks.Set("live", value.MakeString([]byte("v")))
+	ks.SetExpire("live", clk.Now().Add(time.Hour))
+	ks.Set("dead", value.MakeString([]byte("v")))
+	ks.SetExpire("dead", clk.Now().Add(time.Second))
+	clk.Advance(2 * time.Second)
+
+	_, evicted := ks.SampleExpired(clk.Now(), 100)
+	if evicted != 1 {
+		t.Fatalf("evicted = %d, want 1", evicted)
+	}
+	if ks.Exists("dead") {
+		t.Fatal("expired key survived active expiry")
+	}
+	if !ks.Exists("live") {
+		t.Fatal("a live key was evicted")
+	}
+}
+
+func TestSampleExpiredRespectsItsLimit(t *testing.T) {
+	ks, clk := newTestKeyspace()
+	for i := 0; i < 10; i++ {
+		key := fmt.Sprintf("k%d", i)
+		ks.Set(key, value.MakeString([]byte("v")))
+		ks.SetExpire(key, clk.Now().Add(time.Second))
+	}
+	clk.Advance(2 * time.Second)
+	if examined, _ := ks.SampleExpired(clk.Now(), 3); examined != 3 {
+		t.Fatalf("examined = %d, want exactly the limit of 3", examined)
+	}
+}
+
+func TestSampleExpiredIgnoresKeysWithoutATTL(t *testing.T) {
+	ks, clk := newTestKeyspace()
+	ks.Set("permanent", value.MakeString([]byte("v")))
+	examined, evicted := ks.SampleExpired(clk.Now(), 100)
+	if examined != 0 || evicted != 0 {
+		t.Fatalf("examined=%d evicted=%d, want 0 and 0 with no volatile keys", examined, evicted)
+	}
+}
+
+func TestTakeRemovesAndReportsLiveness(t *testing.T) {
+	ks, _ := newTestKeyspace()
+	ks.Set("k", value.MakeString([]byte("v")))
+	e, live := ks.Take("k")
+	if !live {
+		t.Fatal("Take reported a live key as not live")
+	}
+	if string(e.Value.Str()) != "v" {
+		t.Fatalf("Take value = %q, want v", e.Value.Str())
+	}
+	if ks.Exists("k") {
+		t.Fatal("Take did not remove the key")
 	}
 }

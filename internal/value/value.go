@@ -61,6 +61,17 @@ type Value struct {
 // Kind returns the value's discriminator.
 func (v Value) Kind() Kind { return v.kind }
 
+// IsCollection reports whether the value is one of the multi-element container
+// kinds, as opposed to a string or the zero value.
+func (v Value) IsCollection() bool {
+	switch v.kind {
+	case KindList, KindHash, KindSet, KindZSet:
+		return true
+	default:
+		return false
+	}
+}
+
 // normalizeRange resolves Redis-style start and stop indices against a
 // collection of the given length. Negative indices count back from the end, and
 // the range is clamped to the collection's bounds. It returns the inclusive

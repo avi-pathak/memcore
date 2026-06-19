@@ -10,9 +10,9 @@ import (
 func keyCommands() []Command {
 	return []Command{
 		writeKeys("del", -2, cmdDel),
-		// UNLINK shares DEL's semantics. Asynchronous freeing of large values is
-		// an internal optimization added later; it does not change the reply.
-		writeKeys("unlink", -2, cmdDel),
+		// UNLINK matches DEL's reply but frees collection values on a background
+		// reaper, so removing a large key does not stall command execution.
+		writeKeys("unlink", -2, cmdUnlink),
 		readKeys("exists", -2, cmdExists),
 		writeKey("expire", 3, cmdExpire),
 		readKey("ttl", 2, cmdTTL),
@@ -25,6 +25,16 @@ func cmdDel(ctx *Context, args [][]byte) resp.Reply {
 	var n int64
 	for _, raw := range args[1:] {
 		if ctx.Keyspace.Delete(string(raw)) {
+			n++
+		}
+	}
+	return resp.Int(n)
+}
+
+func cmdUnlink(ctx *Context, args [][]byte) resp.Reply {
+	var n int64
+	for _, raw := range args[1:] {
+		if ctx.Keyspace.Unlink(string(raw)) {
 			n++
 		}
 	}

@@ -30,6 +30,7 @@ var seed = maphash.MakeSeed()
 type DB struct {
 	shards []*keyspace.Keyspace
 	mus    []sync.RWMutex
+	reap   func(value.Value) // optional; UNLINK routes freed collections here
 }
 
 // New returns a database with the given number of shards (at least one), each
@@ -148,6 +149,38 @@ func (db *DB) LockAll() func() {
 			db.mus[i].Unlock()
 		}
 	}
+}
+
+// ExpireCycle runs one active-expiry pass: it locks each shard in turn and
+// evicts up to limitPerShard expired keys from it, returning the totals
+// examined and evicted. Locking one shard at a time keeps the pause per shard
+// bounded, so reclamation never blocks the whole database.
+func (db *DB) ExpireCycle(now time.Time, limitPerShard int) (examined, evicted int) {
+	for i := range db.shards {
+		db.mus[i].Lock()
+		ex, ev := db.shards[i].SampleExpired(now, limitPerShard)
+		db.mus[i].Unlock()
+		examined += ex
+		evicted += ev
+	}
+	return examined, evicted
+}
+
+// SetReaper installs fn as the destination for collection values freed by
+// Unlink. It must be called before the database serves traffic.
+func (db *DB) SetReaper(fn func(value.Value)) { db.reap = fn }
+
+// Unlink removes key and reports whether it was live. A removed collection value
+// is handed to the reaper, if one is installed, so the calling goroutine does
+// not wait on its reclamation; smaller values are dropped here and reclaimed by
+// the garbage collector like any other. It assumes the caller holds key's shard
+// lock.
+func (db *DB) Unlink(key string) bool {
+	e, live := db.keyspaceFor(key).Take(key)
+	if live && db.reap != nil && e.Value.IsCollection() {
+		db.reap(e.Value)
+	}
+	return live
 }
 
 // shardSet returns the distinct shard indices for keys, sorted ascending so that
