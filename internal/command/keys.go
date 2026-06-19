@@ -15,6 +15,7 @@ func keyCommands() []Command {
 		writeKeys("unlink", -2, cmdUnlink),
 		readKeys("exists", -2, cmdExists),
 		writeKey("expire", 3, cmdExpire),
+		writeKey("pexpireat", 3, cmdPExpireAt),
 		readKey("ttl", 2, cmdTTL),
 		writeKey("persist", 2, cmdPersist),
 		readKey("type", 2, cmdType),
@@ -58,6 +59,20 @@ func cmdExpire(ctx *Context, args [][]byte) resp.Reply {
 	}
 	at := ctx.Clock.Now().Add(time.Duration(secs) * time.Second)
 	if ctx.Keyspace.SetExpire(string(args[1]), at) {
+		return resp.Int(1)
+	}
+	return resp.Int(0)
+}
+
+// cmdPExpireAt sets an absolute expiry from a Unix-millisecond deadline. The
+// append log rewrites the relative EXPIRE to this form so replay is independent
+// of when it runs.
+func cmdPExpireAt(ctx *Context, args [][]byte) resp.Reply {
+	ms, err := strconv.ParseInt(string(args[2]), 10, 64)
+	if err != nil {
+		return resp.Error(msgNotInteger)
+	}
+	if ctx.Keyspace.SetExpire(string(args[1]), time.UnixMilli(ms)) {
 		return resp.Int(1)
 	}
 	return resp.Int(0)

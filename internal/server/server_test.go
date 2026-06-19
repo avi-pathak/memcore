@@ -24,7 +24,7 @@ func startTestServer(t *testing.T) (addr string, stop func()) {
 	cfg.Network.Port = 0 // let the OS choose a free port
 	cfg.Network.Databases = 4
 
-	srv := New(cfg, clock.SystemClock{}, slog.New(slog.NewTextHandler(io.Discard, nil)), command.NewRegistry())
+	srv := New(cfg, clock.SystemClock{}, discardLogger(), command.NewRegistry())
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -44,6 +44,10 @@ func startTestServer(t *testing.T) (addr string, stop func()) {
 		}
 	}
 	return srv.Addr().String(), stop
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 type testClient struct {
@@ -214,5 +218,67 @@ func TestServerShutsDownWithAnOpenConnection(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("server did not shut down with an open connection")
+	}
+}
+
+func TestServerPersistsAndRecoversAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.Network.Host = "127.0.0.1"
+	cfg.Network.Port = 0
+	cfg.Persistence = config.Persistence{Enabled: true, Dir: dir, FSync: "everysec"}
+
+	// First run: write data, then shut down cleanly so a final snapshot lands.
+	func() {
+		srv := New(cfg, clock.SystemClock{}, discardLogger(), command.NewRegistry())
+		if err := srv.openPersistence(); err != nil {
+			t.Fatalf("openPersistence: %v", err)
+		}
+		if err := srv.Listen(); err != nil {
+			t.Fatalf("Listen: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- srv.Serve(ctx) }()
+
+		c := dialTestClient(t, srv.Addr().String())
+		c.send("SET", "k", "hello")
+		if got := c.line(); got != "+OK" {
+			t.Fatalf("SET = %q, want +OK", got)
+		}
+		c.send("RPUSH", "l", "a", "b")
+		if got := c.line(); got != ":2" {
+			t.Fatalf("RPUSH = %q, want :2", got)
+		}
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	}()
+
+	// Second run: a fresh server recovers the data from disk.
+	srv := New(cfg, clock.SystemClock{}, discardLogger(), command.NewRegistry())
+	if err := srv.openPersistence(); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	c := dialTestClient(t, srv.Addr().String())
+	c.send("GET", "k")
+	if got := c.bulk(); got != "hello" {
+		t.Fatalf("after restart GET k = %q, want hello", got)
+	}
+	c.send("LLEN", "l")
+	if got := c.line(); got != ":2" {
+		t.Fatalf("after restart LLEN l = %q, want :2", got)
 	}
 }

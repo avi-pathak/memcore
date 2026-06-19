@@ -23,10 +23,11 @@ var ErrInvalid = errors.New("config: invalid")
 // Config is the complete runtime configuration. It grows as features land;
 // each field is owned by the subsystem named after its group.
 type Config struct {
-	Network Network
-	Limits  value.Limits
-	Expiry  Expiry
-	Log     Log
+	Network     Network
+	Limits      value.Limits
+	Expiry      Expiry
+	Persistence Persistence
+	Log         Log
 }
 
 // Network holds the listener and logical-database settings.
@@ -47,6 +48,15 @@ type Log struct {
 type Expiry struct {
 	Interval       time.Duration // time between cycles; 0 disables active expiry
 	SamplePerShard int           // keys examined per shard per cycle
+}
+
+// Persistence configures durability. It is off by default: writing to disk is
+// an explicit operator decision.
+type Persistence struct {
+	Enabled      bool
+	Dir          string        // directory holding the snapshot and append log
+	FSync        string        // "always", "everysec", or "no"
+	CompactEvery time.Duration // append-log compaction interval; 0 disables it
 }
 
 // Default returns a valid configuration with conservative defaults. The bind
@@ -70,6 +80,12 @@ func Default() Config {
 		Expiry: Expiry{
 			Interval:       100 * time.Millisecond,
 			SamplePerShard: 20,
+		},
+		Persistence: Persistence{
+			Enabled:      false,
+			Dir:          "data",
+			FSync:        "everysec",
+			CompactEvery: 5 * time.Minute,
 		},
 		Log: Log{
 			Level:  slog.LevelInfo,
@@ -103,6 +119,16 @@ func (c Config) Validate() error {
 	}
 	if c.Expiry.SamplePerShard < 0 {
 		return fmt.Errorf("%w: expiry sample size must not be negative", ErrInvalid)
+	}
+	if c.Persistence.Enabled {
+		if c.Persistence.Dir == "" {
+			return fmt.Errorf("%w: persistence directory must be set when persistence is enabled", ErrInvalid)
+		}
+		switch c.Persistence.FSync {
+		case "always", "everysec", "no":
+		default:
+			return fmt.Errorf("%w: fsync policy %q must be \"always\", \"everysec\", or \"no\"", ErrInvalid, c.Persistence.FSync)
+		}
 	}
 	switch c.Log.Format {
 	case "text", "json":

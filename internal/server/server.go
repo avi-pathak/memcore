@@ -4,6 +4,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"github.com/avinashpathak/memcore/internal/command"
 	"github.com/avinashpathak/memcore/internal/config"
 	"github.com/avinashpathak/memcore/internal/expiry"
+	"github.com/avinashpathak/memcore/internal/keyspace"
+	"github.com/avinashpathak/memcore/internal/persistence"
 	"github.com/avinashpathak/memcore/internal/resp"
 	"github.com/avinashpathak/memcore/internal/shard"
 	"github.com/avinashpathak/memcore/internal/value"
@@ -30,10 +33,12 @@ type Server struct {
 	log      *slog.Logger
 	registry *command.Registry
 
-	databases []*shard.DB
-	limits    value.Limits
-	expiry    *expiry.Runner
-	reaper    chan value.Value
+	databases  []*shard.DB
+	limits     value.Limits
+	expiry     *expiry.Runner
+	reaper     chan value.Value
+	persist    *persistence.Store
+	persistCfg config.Persistence
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -50,14 +55,15 @@ func New(cfg config.Config, clk clock.Clock, log *slog.Logger, registry *command
 		dbs[i] = shard.New(cfg.Network.Shards, clk)
 	}
 	s := &Server{
-		cfg:       cfg.Network,
-		clock:     clk,
-		log:       log,
-		registry:  registry,
-		databases: dbs,
-		limits:    cfg.Limits,
-		conns:     make(map[*conn]struct{}),
-		reaper:    make(chan value.Value, reaperBuffer),
+		cfg:        cfg.Network,
+		clock:      clk,
+		log:        log,
+		registry:   registry,
+		databases:  dbs,
+		limits:     cfg.Limits,
+		persistCfg: cfg.Persistence,
+		conns:      make(map[*conn]struct{}),
+		reaper:     make(chan value.Value, reaperBuffer),
 	}
 	s.expiry = expiry.New(dbs, clk, expiry.Config{
 		Interval:       cfg.Expiry.Interval,
@@ -113,6 +119,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	go func() { defer s.wg.Done(); s.runReaper(ctx) }()
 	go func() { defer s.wg.Done(); s.expiry.Run(ctx) }()
 
+	if s.persist != nil {
+		s.wg.Add(2)
+		go func() { defer s.wg.Done(); s.runAppendLogFlush(ctx) }()
+		go func() { defer s.wg.Done(); s.runCompaction(ctx) }()
+	}
+
 	for {
 		nc, err := ln.Accept()
 		if err != nil {
@@ -126,6 +138,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 
 	s.wg.Wait()
+	if s.persist != nil {
+		if err := s.finalizePersistence(); err != nil {
+			s.log.Error("final snapshot failed", "error", err)
+		}
+	}
 	s.log.Info("server stopped")
 	return nil
 }
@@ -133,6 +150,9 @@ func (s *Server) Serve(ctx context.Context) error {
 // Run binds and serves in one call. main uses it; tests use Listen and Serve
 // separately so they can read the OS-chosen port.
 func (s *Server) Run(ctx context.Context) error {
+	if err := s.openPersistence(); err != nil {
+		return err
+	}
 	if err := s.Listen(); err != nil {
 		return err
 	}
@@ -219,4 +239,152 @@ func (s *Server) runReaper(ctx context.Context) {
 		case <-s.reaper:
 		}
 	}
+}
+
+// openPersistence opens the data directory and recovers prior state. It is a
+// no-op when persistence is disabled.
+func (s *Server) openPersistence() error {
+	if !s.persistCfg.Enabled {
+		return nil
+	}
+	store, err := persistence.Open(s.persistCfg.Dir, s.persistCfg.FSync, s.limits)
+	if err != nil {
+		return fmt.Errorf("open persistence: %w", err)
+	}
+	s.persist = store
+	return s.recover()
+}
+
+func (s *Server) recover() error {
+	restore := func(rec persistence.Record) error {
+		if rec.DB < 0 || rec.DB >= len(s.databases) {
+			return fmt.Errorf("snapshot names database %d out of range", rec.DB)
+		}
+		e := keyspace.Entry{Value: rec.Value}
+		if rec.ExpireAt != 0 {
+			e.ExpireAt = time.Unix(0, rec.ExpireAt)
+		}
+		s.databases[rec.DB].Restore(rec.Key, e)
+		return nil
+	}
+	session := command.NewContext(s.clock, s.databases, s.limits)
+	replay := func(db int, args [][]byte) error {
+		if err := session.Select(db); err != nil {
+			return err
+		}
+		s.registry.Dispatch(session, args) // a replayed write is expected to succeed
+		return nil
+	}
+	loaded, replayed, err := persistence.Recover(s.persistCfg.Dir, s.limits, restore, replay)
+	if err != nil {
+		return fmt.Errorf("recover: %w", err)
+	}
+	s.log.Info("recovered state", "snapshot_records", loaded, "replayed_commands", replayed)
+	return nil
+}
+
+// runAppendLogFlush fsyncs the append log once a second under the everysec
+// policy; the other policies fsync inline or leave it to the OS.
+func (s *Server) runAppendLogFlush(ctx context.Context) {
+	if s.persistCfg.FSync != persistence.FSyncEverySec {
+		<-ctx.Done()
+		return
+	}
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := s.persist.Flush(); err != nil {
+				s.log.Error("append-log flush failed", "error", err)
+			}
+		}
+	}
+}
+
+func (s *Server) runCompaction(ctx context.Context) {
+	if s.persistCfg.CompactEvery <= 0 {
+		<-ctx.Done()
+		return
+	}
+	t := time.NewTicker(s.persistCfg.CompactEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := s.compact(); err != nil {
+				s.log.Error("compaction failed", "error", err)
+			}
+		}
+	}
+}
+
+// compact captures the live state into an in-memory snapshot under a brief lock
+// over every database, then writes it to disk and trims the append log off the
+// lock. There is no process fork; the only pause is the in-memory capture.
+func (s *Server) compact() error {
+	baseGen := s.persist.NextGen()
+	var buf bytes.Buffer
+
+	unlock := s.lockAllDatabases()
+	werr := persistence.WriteSnapshot(&buf, baseGen, s.emitRecords)
+	_, rerr := s.persist.Rotate()
+	unlock()
+
+	if werr != nil {
+		return werr
+	}
+	if rerr != nil {
+		return rerr
+	}
+	return s.persist.InstallSnapshot(buf.Bytes(), baseGen)
+}
+
+func (s *Server) finalizePersistence() error {
+	if err := s.persist.Flush(); err != nil {
+		return err
+	}
+	if err := s.compact(); err != nil {
+		return err
+	}
+	return s.persist.Close()
+}
+
+// lockAllDatabases write-locks every shard of every database, returning a
+// function that releases them. Only compaction takes locks across databases, and
+// always in this order, so it cannot deadlock against single-database commands.
+func (s *Server) lockAllDatabases() func() {
+	unlocks := make([]func(), len(s.databases))
+	for i, db := range s.databases {
+		unlocks[i] = db.LockAll()
+	}
+	return func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+	}
+}
+
+func (s *Server) emitRecords(write func(persistence.Record) error) error {
+	for db := range s.databases {
+		var err error
+		s.databases[db].EachEntry(func(key string, e keyspace.Entry) {
+			if err != nil {
+				return
+			}
+			var expireAt int64
+			if e.HasExpiry() {
+				expireAt = e.ExpireAt.UnixNano()
+			}
+			err = write(persistence.Record{DB: db, Key: key, ExpireAt: expireAt, Value: e.Value})
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

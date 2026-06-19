@@ -161,6 +161,14 @@ func (k *Keyspace) SampleExpired(now time.Time, limit int) (examined, evicted in
 // have not yet been reclaimed.
 func (k *Keyspace) Len() int { return len(k.entries) }
 
+// Range calls fn for every stored entry in unspecified order. It is read-only
+// and used for snapshotting; the caller must hold the shard's lock.
+func (k *Keyspace) Range(fn func(key string, e Entry)) {
+	for key, e := range k.entries {
+		fn(key, e)
+	}
+}
+
 // Flush removes every entry.
 func (k *Keyspace) Flush() {
 	clear(k.entries)

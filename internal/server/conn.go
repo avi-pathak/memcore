@@ -4,7 +4,10 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
+	"time"
 
+	"github.com/avinashpathak/memcore/internal/clock"
 	"github.com/avinashpathak/memcore/internal/command"
 	"github.com/avinashpathak/memcore/internal/resp"
 	"github.com/avinashpathak/memcore/internal/shard"
@@ -68,7 +71,28 @@ func (s *Server) execute(c *conn, args [][]byte) (reply resp.Reply) {
 	db := s.databases[c.session.DB()]
 	unlock := lockShards(db, cmd, args)
 	defer unlock()
-	return cmd.Run(c.session, args)
+	reply = cmd.Run(c.session, args)
+	// Log successful writes under the shard lock, so same-key writes reach the
+	// log in the order they were applied.
+	if s.persist != nil && !cmd.ReadOnly() && !reply.IsError() {
+		if err := s.persist.Append(c.session.DB(), persistArgs(s.clock, cmd, args)); err != nil {
+			s.log.Error("append-log write failed", "command", cmd.Name(), "error", err)
+		}
+	}
+	return reply
+}
+
+// persistArgs returns the form of a write command to record. EXPIRE is rewritten
+// to PEXPIREAT with an absolute deadline so replay does not depend on when it
+// runs; other commands are logged verbatim.
+func persistArgs(clk clock.Clock, cmd command.Command, args [][]byte) [][]byte {
+	if cmd.Name() == "expire" && len(args) == 3 {
+		if secs, err := strconv.ParseInt(string(args[2]), 10, 64); err == nil {
+			ms := clk.Now().Add(time.Duration(secs) * time.Second).UnixMilli()
+			return [][]byte{[]byte("PEXPIREAT"), args[1], []byte(strconv.FormatInt(ms, 10))}
+		}
+	}
+	return args
 }
 
 // lockShards takes the locks a command needs before it runs: every shard for a

@@ -109,6 +109,21 @@ func (db *DB) Len() int {
 	return n
 }
 
+// EachEntry calls fn for every entry in every shard. It does no locking; a caller
+// iterating a live database must already hold the shard locks, which the
+// snapshot path does for the whole database at once.
+func (db *DB) EachEntry(fn func(key string, e keyspace.Entry)) {
+	for _, ks := range db.shards {
+		ks.Range(fn)
+	}
+}
+
+// Restore inserts a key's entry, routing it to its shard. It is used by recovery
+// when no other goroutine is running, and does no locking.
+func (db *DB) Restore(key string, e keyspace.Entry) {
+	db.keyspaceFor(key).SetEntry(key, e)
+}
+
 // LockKeys write-locks the shards covering keys, in ascending shard order, and
 // returns a function that releases them.
 func (db *DB) LockKeys(keys [][]byte) func() {
