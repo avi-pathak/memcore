@@ -4,12 +4,18 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/avinashpathak/memcore/internal/clock"
+	"github.com/avinashpathak/memcore/internal/command"
 	"github.com/avinashpathak/memcore/internal/config"
+	"github.com/avinashpathak/memcore/internal/server"
 )
 
 // Build metadata, injected with -ldflags "-X main.version=... -X main.commit=...".
@@ -45,12 +51,22 @@ func run() error {
 	}
 
 	logger := newLogger(cfg.Log)
-	logger.Info("memcored configured",
+	logger.Info("starting memcored",
 		"version", version,
 		"commit", commit,
 		"addr", cfg.Network.Addr(),
 		"databases", cfg.Network.Databases,
 	)
+
+	srv := server.New(cfg, clock.SystemClock{}, logger, command.NewRegistry())
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := srv.Run(ctx); err != nil {
+		return err
+	}
+	logger.Info("shutdown complete")
 	return nil
 }
 

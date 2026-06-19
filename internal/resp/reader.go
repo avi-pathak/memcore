@@ -33,6 +33,11 @@ func NewReader(rd io.Reader) *Reader {
 	return &Reader{r: bufio.NewReaderSize(rd, readBufferSize)}
 }
 
+// Buffered reports how many bytes are available without a read from the
+// underlying stream. The server uses it to batch replies for pipelined
+// requests: it flushes only when no further request is already buffered.
+func (r *Reader) Buffered() int { return r.r.Buffered() }
+
 // ReadRequest reads one client request: a command name followed by its
 // arguments. It accepts the multi-bulk form clients use and the inline form a
 // raw terminal sends. A clean end of stream between requests returns io.EOF; an

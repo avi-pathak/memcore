@@ -1,0 +1,190 @@
+// Package server runs the TCP listener and owns every other layer. It is the
+// only package that touches sockets, and the only one that turns errors into
+// RESP error replies.
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"sync"
+	"time"
+
+	"github.com/avinashpathak/memcore/internal/clock"
+	"github.com/avinashpathak/memcore/internal/command"
+	"github.com/avinashpathak/memcore/internal/config"
+	"github.com/avinashpathak/memcore/internal/keyspace"
+	"github.com/avinashpathak/memcore/internal/resp"
+)
+
+// database is one logical keyspace guarded by a single lock. A command holds the
+// lock for its whole execution, which keeps read-modify-write commands such as
+// INCR atomic. Stage 6 replaces this single lock with per-shard locks for
+// intra-database parallelism.
+type database struct {
+	mu sync.Mutex
+	ks *keyspace.Keyspace
+}
+
+// Server accepts client connections and serves RESP commands. It is safe for
+// concurrent use: each connection runs on its own goroutine, and the only
+// shared mutable state is the databases, each guarded by its own lock.
+type Server struct {
+	cfg      config.Network
+	clock    clock.Clock
+	log      *slog.Logger
+	registry *command.Registry
+
+	databases []*database
+	keyspaces []*keyspace.Keyspace // the same keyspaces, shared by every connection's session
+
+	mu       sync.Mutex
+	listener net.Listener
+	conns    map[*conn]struct{}
+	closing  bool
+	wg       sync.WaitGroup
+}
+
+// New builds a server with cfg.Network.Databases independent databases.
+func New(cfg config.Config, clk clock.Clock, log *slog.Logger, registry *command.Registry) *Server {
+	n := cfg.Network.Databases
+	dbs := make([]*database, n)
+	kss := make([]*keyspace.Keyspace, n)
+	for i := range dbs {
+		ks := keyspace.New(clk)
+		dbs[i] = &database{ks: ks}
+		kss[i] = ks
+	}
+	return &Server{
+		cfg:       cfg.Network,
+		clock:     clk,
+		log:       log,
+		registry:  registry,
+		databases: dbs,
+		keyspaces: kss,
+		conns:     make(map[*conn]struct{}),
+	}
+}
+
+// Listen binds the configured address. Splitting it from Serve lets a caller
+// learn the bound address (useful when the OS chooses the port) before any
+// connection is accepted.
+func (s *Server) Listen() error {
+	ln, err := net.Listen("tcp", s.cfg.Addr())
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", s.cfg.Addr(), err)
+	}
+	s.mu.Lock()
+	s.listener = ln
+	s.mu.Unlock()
+	return nil
+}
+
+// Addr returns the bound address, or nil before Listen succeeds.
+func (s *Server) Addr() net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener == nil {
+		return nil
+	}
+	return s.listener.Addr()
+}
+
+// Serve accepts connections until ctx is canceled, then stops accepting, drains
+// in-flight connections, and returns. Listen must have run first.
+func (s *Server) Serve(ctx context.Context) error {
+	s.mu.Lock()
+	ln := s.listener
+	s.mu.Unlock()
+	if ln == nil {
+		return errors.New("server: Serve called before Listen")
+	}
+	s.log.Info("listening", "addr", ln.Addr().String())
+
+	go func() {
+		<-ctx.Done()
+		s.shutdown()
+	}()
+
+	for {
+		nc, err := ln.Accept()
+		if err != nil {
+			if s.isClosing() {
+				break
+			}
+			s.log.Warn("accept failed", "error", err)
+			continue
+		}
+		s.startConn(nc)
+	}
+
+	s.wg.Wait()
+	s.log.Info("server stopped")
+	return nil
+}
+
+// Run binds and serves in one call. main uses it; tests use Listen and Serve
+// separately so they can read the OS-chosen port.
+func (s *Server) Run(ctx context.Context) error {
+	if err := s.Listen(); err != nil {
+		return err
+	}
+	return s.Serve(ctx)
+}
+
+func (s *Server) startConn(nc net.Conn) {
+	c := &conn{
+		nc:      nc,
+		reader:  resp.NewReader(nc),
+		writer:  resp.NewWriter(nc),
+		session: command.NewContext(s.clock, s.keyspaces),
+	}
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		_ = nc.Close()
+		return
+	}
+	s.conns[c] = struct{}{}
+	s.wg.Add(1)
+	s.mu.Unlock()
+
+	go func() {
+		defer s.wg.Done()
+		s.serve(c)
+	}()
+}
+
+func (s *Server) closeConn(c *conn) {
+	s.mu.Lock()
+	delete(s.conns, c)
+	s.mu.Unlock()
+	_ = c.nc.Close()
+}
+
+func (s *Server) isClosing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closing
+}
+
+// shutdown stops accepting and winds down open connections by closing the
+// listener and tripping each connection's read deadline. A command already in
+// flight finishes and writes its reply before the connection's next read
+// returns the deadline error.
+func (s *Server) shutdown() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return
+	}
+	s.closing = true
+	if s.listener != nil {
+		_ = s.listener.Close()
+	}
+	for c := range s.conns {
+		_ = c.nc.SetReadDeadline(time.Now())
+	}
+}

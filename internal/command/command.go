@@ -6,16 +6,53 @@
 package command
 
 import (
+	"errors"
+
 	"github.com/avinashpathak/memcore/internal/clock"
 	"github.com/avinashpathak/memcore/internal/keyspace"
 	"github.com/avinashpathak/memcore/internal/resp"
 )
 
-// Context is the environment a command runs against: the selected database's
-// keyspace and the clock. The server builds one per command invocation.
+var errDBOutOfRange = errors.New("database index out of range")
+
+// Context is a connection's session: the clock, the set of logical databases,
+// and which one is selected. One Context is created per connection and threaded
+// through every command on it, so SELECT can change the active database for the
+// commands that follow.
+//
+// A Context is owned by a single connection goroutine. The server holds the
+// selected database's lock for the duration of each command, so handlers read
+// and write Keyspace without locking. Keyspace always refers to databases[index]
+// and is kept in step by Select.
 type Context struct {
-	Keyspace *keyspace.Keyspace
+	Keyspace *keyspace.Keyspace // the selected database
 	Clock    clock.Clock
+
+	databases []*keyspace.Keyspace
+	index     int
+}
+
+// NewContext returns a session over databases positioned at database 0.
+func NewContext(clk clock.Clock, databases []*keyspace.Keyspace) *Context {
+	c := &Context{Clock: clk, databases: databases}
+	if len(databases) > 0 {
+		c.Keyspace = databases[0]
+	}
+	return c
+}
+
+// DB returns the index of the selected database.
+func (c *Context) DB() int { return c.index }
+
+// Select switches the active database. It reports an error and leaves the
+// selection unchanged when index is out of range.
+func (c *Context) Select(index int) error {
+	if index < 0 || index >= len(c.databases) {
+		return errDBOutOfRange
+	}
+	c.index = index
+	c.Keyspace = c.databases[index]
+	return nil
 }
 
 // Handler executes a command. args is the whole RESP request array, including

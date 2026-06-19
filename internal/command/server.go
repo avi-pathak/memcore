@@ -1,12 +1,28 @@
 package command
 
-import "github.com/avinashpathak/memcore/internal/resp"
+import (
+	"strconv"
+
+	"github.com/avinashpathak/memcore/internal/resp"
+)
 
 func serverCommands() []Command {
 	return []Command{
 		newCommand("ping", -1, cmdPing),
+		newCommand("select", 2, cmdSelect),
 		newCommand("flushdb", -1, cmdFlushDB),
 	}
+}
+
+func cmdSelect(ctx *Context, args [][]byte) resp.Reply {
+	idx, err := strconv.Atoi(string(args[1]))
+	if err != nil {
+		return resp.Error("ERR value is not an integer or out of range")
+	}
+	if err := ctx.Select(idx); err != nil {
+		return resp.Error("ERR DB index is out of range")
+	}
+	return resp.OK()
 }
 
 func cmdPing(_ *Context, args [][]byte) resp.Reply {

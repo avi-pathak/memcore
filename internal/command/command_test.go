@@ -10,9 +10,16 @@ import (
 )
 
 func newTestEnv() (*Registry, *Context, *clock.ManualClock) {
+	return newTestEnvN(1)
+}
+
+func newTestEnvN(databases int) (*Registry, *Context, *clock.ManualClock) {
 	clk := clock.NewManualClock(time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC))
-	ctx := &Context{Keyspace: keyspace.New(clk), Clock: clk}
-	return NewRegistry(), ctx, clk
+	dbs := make([]*keyspace.Keyspace, databases)
+	for i := range dbs {
+		dbs[i] = keyspace.New(clk)
+	}
+	return NewRegistry(), NewContext(clk, dbs), clk
 }
 
 // run dispatches a command from string arguments and returns its reply.

@@ -31,3 +31,26 @@ func TestFlushdbEmptiesTheDatabase(t *testing.T) {
 		t.Fatalf("EXISTS after FLUSHDB = %v, want 0", got)
 	}
 }
+
+func TestSelectIsolatesDatabases(t *testing.T) {
+	r, ctx, _ := newTestEnvN(2)
+	run(r, ctx, "SET", "k", "db0")
+	if got := run(r, ctx, "SELECT", "1"); !got.Equal(resp.OK()) {
+		t.Fatalf("SELECT 1 = %v, want OK", got)
+	}
+	if got := run(r, ctx, "GET", "k"); !got.Equal(resp.Nil()) {
+		t.Fatalf("GET in db1 = %v, want nil", got)
+	}
+	run(r, ctx, "SET", "k", "db1")
+	run(r, ctx, "SELECT", "0")
+	if got := run(r, ctx, "GET", "k"); !got.Equal(resp.BulkString("db0")) {
+		t.Fatalf("GET in db0 = %v, want db0", got)
+	}
+}
+
+func TestSelectRejectsAnOutOfRangeIndex(t *testing.T) {
+	r, ctx, _ := newTestEnvN(2)
+	if got := run(r, ctx, "SELECT", "5"); !got.IsError() {
+		t.Fatalf("SELECT 5 = %v, want an error", got)
+	}
+}
