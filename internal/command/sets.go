@@ -24,7 +24,7 @@ func cmdSAdd(ctx *Context, args [][]byte) resp.Reply {
 		}
 		s = e.Value.Set()
 	} else {
-		s = value.NewSet()
+		s = value.NewSet(ctx.Limits.Set)
 	}
 	var added int64
 	for _, m := range args[2:] {

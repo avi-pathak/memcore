@@ -31,7 +31,7 @@ func listPush(ctx *Context, args [][]byte, front bool) resp.Reply {
 		}
 		l = e.Value.List()
 	} else {
-		l = value.NewList()
+		l = value.NewList(ctx.Limits.List)
 	}
 	for _, v := range args[2:] {
 		if front {

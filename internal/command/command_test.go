@@ -7,6 +7,7 @@ import (
 	"github.com/avinashpathak/memcore/internal/clock"
 	"github.com/avinashpathak/memcore/internal/resp"
 	"github.com/avinashpathak/memcore/internal/shard"
+	"github.com/avinashpathak/memcore/internal/value"
 )
 
 func newTestEnv() (*Registry, *Context, *clock.ManualClock) {
@@ -19,7 +20,9 @@ func newTestEnvN(databases int) (*Registry, *Context, *clock.ManualClock) {
 	for i := range dbs {
 		dbs[i] = shard.New(4, clk)
 	}
-	return NewRegistry(), NewContext(clk, dbs), clk
+	compact := value.Thresholds{MaxEntries: 128, MaxBytes: 64}
+	limits := value.Limits{List: compact, Hash: compact, Set: compact, ZSet: compact}
+	return NewRegistry(), NewContext(clk, dbs, limits), clk
 }
 
 // run dispatches a command from string arguments and returns its reply.

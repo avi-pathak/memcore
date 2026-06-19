@@ -17,6 +17,7 @@ import (
 	"github.com/avinashpathak/memcore/internal/config"
 	"github.com/avinashpathak/memcore/internal/resp"
 	"github.com/avinashpathak/memcore/internal/shard"
+	"github.com/avinashpathak/memcore/internal/value"
 )
 
 // Server accepts client connections and serves RESP commands. It is safe for
@@ -29,6 +30,7 @@ type Server struct {
 	registry *command.Registry
 
 	databases []*shard.DB
+	limits    value.Limits
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -50,6 +52,7 @@ func New(cfg config.Config, clk clock.Clock, log *slog.Logger, registry *command
 		log:       log,
 		registry:  registry,
 		databases: dbs,
+		limits:    cfg.Limits,
 		conns:     make(map[*conn]struct{}),
 	}
 }
@@ -125,7 +128,7 @@ func (s *Server) startConn(nc net.Conn) {
 		nc:      nc,
 		reader:  resp.NewReader(nc),
 		writer:  resp.NewWriter(nc),
-		session: command.NewContext(s.clock, s.databases),
+		session: command.NewContext(s.clock, s.databases, s.limits),
 	}
 	s.mu.Lock()
 	if s.closing {

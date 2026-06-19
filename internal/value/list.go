@@ -1,24 +1,23 @@
 package value
 
-import "bytes"
+import (
+	"bytes"
+	"encoding/binary"
+)
 
-// List is the full representation of a Redis list: a doubly-linked list of
-// binary-safe values with O(1) access at both ends. The compact encoding for
-// small lists is a separate type that promotes to this one.
-//
-// A List owns the bytes pushed into it, so callers may reuse their buffers.
+// List is an ordered sequence of binary-safe values. A small list is held in a
+// compact packed encoding; it promotes to a doubly-linked representation once it
+// crosses its thresholds, and never demotes. A List owns the bytes pushed into
+// it, so callers may reuse their buffers.
 type List struct {
-	head, tail *listNode
-	length     int
+	pack  []byte
+	count int
+	full  *fullList
+	max   Thresholds
 }
 
-type listNode struct {
-	value      []byte
-	prev, next *listNode
-}
-
-// NewList returns an empty list.
-func NewList() *List { return &List{} }
+// NewList returns an empty list bounded by max.
+func NewList(max Thresholds) *List { return &List{max: max} }
 
 // MakeList returns a Value wrapping l.
 func MakeList(l *List) Value { return Value{kind: KindList, list: l} }
@@ -31,11 +30,128 @@ func (v Value) List() *List {
 	return v.list
 }
 
+// Compact reports whether the list is still in its packed encoding. It is here
+// for tests and introspection.
+func (l *List) Compact() bool { return l.full == nil }
+
 // Len reports the number of elements.
-func (l *List) Len() int { return l.length }
+func (l *List) Len() int {
+	if l.full != nil {
+		return l.full.length
+	}
+	return l.count
+}
 
 // PushFront prepends a copy of b.
 func (l *List) PushFront(b []byte) {
+	if l.full != nil {
+		l.full.pushFront(b)
+		return
+	}
+	l.pack = append(packAppend(nil, b), l.pack...)
+	l.count++
+	l.promoteIfNeeded(len(b))
+}
+
+// PushBack appends a copy of b.
+func (l *List) PushBack(b []byte) {
+	if l.full != nil {
+		l.full.pushBack(b)
+		return
+	}
+	l.pack = packAppend(l.pack, b)
+	l.count++
+	l.promoteIfNeeded(len(b))
+}
+
+// PopFront removes and returns the first element.
+func (l *List) PopFront() ([]byte, bool) {
+	if l.full != nil {
+		return l.full.popFront()
+	}
+	if l.count == 0 {
+		return nil, false
+	}
+	n, w := binary.Uvarint(l.pack)
+	out := bytes.Clone(l.pack[w : w+int(n)])
+	l.pack = bytes.Clone(l.pack[w+int(n):])
+	l.count--
+	return out, true
+}
+
+// PopBack removes and returns the last element.
+func (l *List) PopBack() ([]byte, bool) {
+	if l.full != nil {
+		return l.full.popBack()
+	}
+	if l.count == 0 {
+		return nil, false
+	}
+	lastOff, dataOff, dataLen := 0, 0, 0
+	for off := 0; off < len(l.pack); {
+		n, w := binary.Uvarint(l.pack[off:])
+		lastOff, dataOff, dataLen = off, off+w, int(n)
+		off = off + w + int(n)
+	}
+	out := bytes.Clone(l.pack[dataOff : dataOff+dataLen])
+	l.pack = l.pack[:lastOff]
+	l.count--
+	return out, true
+}
+
+// Range returns the elements between the start and stop ranks, inclusive, with
+// Redis index semantics: negative indices count from the end, and the range is
+// clamped to the list bounds.
+func (l *List) Range(start, stop int) [][]byte {
+	if l.full != nil {
+		return l.full.rangeElems(start, stop)
+	}
+	lo, hi, ok := normalizeRange(start, stop, l.count)
+	if !ok {
+		return nil
+	}
+	out := make([][]byte, 0, hi-lo+1)
+	i := 0
+	packEach(l.pack, func(e []byte) bool {
+		if i >= lo {
+			out = append(out, bytes.Clone(e))
+		}
+		i++
+		return i <= hi
+	})
+	return out
+}
+
+func (l *List) promoteIfNeeded(elemSize int) {
+	if l.max.exceeded(l.count, elemSize) {
+		l.promote()
+	}
+}
+
+func (l *List) promote() {
+	full := &fullList{}
+	packEach(l.pack, func(e []byte) bool {
+		full.pushBack(e)
+		return true
+	})
+	l.full = full
+	l.pack = nil
+	l.count = 0
+}
+
+// fullList is the promoted representation: a doubly-linked list with O(1) access
+// at both ends. Its element bytes are immutable once stored.
+type fullList struct {
+	head, tail *listNode
+	length     int
+}
+
+type listNode struct {
+	value      []byte
+	prev, next *listNode
+}
+
+func (l *fullList) pushFront(b []byte) {
 	n := &listNode{value: bytes.Clone(b), next: l.head}
 	if l.head != nil {
 		l.head.prev = n
@@ -46,8 +162,7 @@ func (l *List) PushFront(b []byte) {
 	l.length++
 }
 
-// PushBack appends a copy of b.
-func (l *List) PushBack(b []byte) {
+func (l *fullList) pushBack(b []byte) {
 	n := &listNode{value: bytes.Clone(b), prev: l.tail}
 	if l.tail != nil {
 		l.tail.next = n
@@ -58,8 +173,7 @@ func (l *List) PushBack(b []byte) {
 	l.length++
 }
 
-// PopFront removes and returns the first element.
-func (l *List) PopFront() ([]byte, bool) {
+func (l *fullList) popFront() ([]byte, bool) {
 	if l.head == nil {
 		return nil, false
 	}
@@ -74,8 +188,7 @@ func (l *List) PopFront() ([]byte, bool) {
 	return n.value, true
 }
 
-// PopBack removes and returns the last element.
-func (l *List) PopBack() ([]byte, bool) {
+func (l *fullList) popBack() ([]byte, bool) {
 	if l.tail == nil {
 		return nil, false
 	}
@@ -90,11 +203,7 @@ func (l *List) PopBack() ([]byte, bool) {
 	return n.value, true
 }
 
-// Range returns the elements between the start and stop ranks, inclusive, with
-// Redis index semantics: negative indices count from the end, and the range is
-// clamped to the list bounds. The returned slices alias the stored bytes, which
-// are immutable.
-func (l *List) Range(start, stop int) [][]byte {
+func (l *fullList) rangeElems(start, stop int) [][]byte {
 	lo, hi, ok := normalizeRange(start, stop, l.length)
 	if !ok {
 		return nil

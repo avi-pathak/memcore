@@ -1,6 +1,7 @@
 package command
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/avinashpathak/memcore/internal/resp"
@@ -60,5 +61,21 @@ func TestLPopOnAMissingKeyIsNil(t *testing.T) {
 	r, ctx, _ := newTestEnv()
 	if got := run(r, ctx, "LPOP", "absent"); !got.Equal(resp.Nil()) {
 		t.Fatalf("LPOP absent = %v, want nil", got)
+	}
+}
+
+func TestALargeListPromotesAndStillServesCommands(t *testing.T) {
+	r, ctx, _ := newTestEnv()
+	for i := 0; i < 200; i++ { // exceeds the default compact threshold of 128
+		run(r, ctx, "RPUSH", "l", strconv.Itoa(i))
+	}
+	if got := run(r, ctx, "LLEN", "l"); !got.Equal(resp.Int(200)) {
+		t.Fatalf("LLEN = %v, want 200", got)
+	}
+	if got := run(r, ctx, "LRANGE", "l", "0", "0"); !got.Equal(resp.Array([]resp.Reply{resp.BulkString("0")})) {
+		t.Fatalf("LRANGE 0 0 = %v, want [0]", got)
+	}
+	if got := run(r, ctx, "LRANGE", "l", "-1", "-1"); !got.Equal(resp.Array([]resp.Reply{resp.BulkString("199")})) {
+		t.Fatalf("LRANGE -1 -1 = %v, want [199]", got)
 	}
 }

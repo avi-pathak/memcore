@@ -11,6 +11,7 @@ import (
 	"github.com/avinashpathak/memcore/internal/clock"
 	"github.com/avinashpathak/memcore/internal/resp"
 	"github.com/avinashpathak/memcore/internal/shard"
+	"github.com/avinashpathak/memcore/internal/value"
 )
 
 var errDBOutOfRange = errors.New("database index out of range")
@@ -27,14 +28,15 @@ var errDBOutOfRange = errors.New("database index out of range")
 type Context struct {
 	Keyspace *shard.DB // the selected database
 	Clock    clock.Clock
+	Limits   value.Limits // compact-encoding thresholds for new collections
 
 	databases []*shard.DB
 	index     int
 }
 
 // NewContext returns a session over databases positioned at database 0.
-func NewContext(clk clock.Clock, databases []*shard.DB) *Context {
-	c := &Context{Clock: clk, databases: databases}
+func NewContext(clk clock.Clock, databases []*shard.DB, limits value.Limits) *Context {
+	c := &Context{Clock: clk, Limits: limits, databases: databases}
 	if len(databases) > 0 {
 		c.Keyspace = databases[0]
 	}

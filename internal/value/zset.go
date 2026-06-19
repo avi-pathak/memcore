@@ -1,15 +1,12 @@
 package value
 
-import "math/rand/v2"
-
-// ZSet is the full representation of a Redis sorted set: a map from member to
-// score for O(1) score lookup, and a skip list that keeps members ordered by
-// score (ties broken by member) for range queries. The compact encoding for
-// small sorted sets is a separate type that promotes to this one.
-type ZSet struct {
-	scores map[string]float64
-	order  *zskiplist
-}
+import (
+	"bytes"
+	"encoding/binary"
+	"math"
+	"math/rand/v2"
+	"sort"
+)
 
 // ZMember pairs a member with its score, as returned by a range query.
 type ZMember struct {
@@ -17,10 +14,18 @@ type ZMember struct {
 	Score  float64
 }
 
-// NewZSet returns an empty sorted set.
-func NewZSet() *ZSet {
-	return &ZSet{scores: make(map[string]float64), order: newZskiplist()}
+// ZSet is a set of members ordered by score. A small sorted set is held in a
+// compact packed encoding kept in score order; it promotes to a member-to-score
+// map paired with a skip list once it crosses its thresholds, and never demotes.
+type ZSet struct {
+	pack  []byte
+	count int
+	full  *fullZSet
+	max   Thresholds
 }
+
+// NewZSet returns an empty sorted set bounded by max.
+func NewZSet(max Thresholds) *ZSet { return &ZSet{max: max} }
 
 // MakeZSet returns a Value wrapping z.
 func MakeZSet(z *ZSet) Value { return Value{kind: KindZSet, zset: z} }
@@ -34,12 +39,150 @@ func (v Value) ZSet() *ZSet {
 	return v.zset
 }
 
+// Compact reports whether the sorted set is still in its packed encoding.
+func (z *ZSet) Compact() bool { return z.full == nil }
+
 // Len reports the number of members.
-func (z *ZSet) Len() int { return len(z.scores) }
+func (z *ZSet) Len() int {
+	if z.full != nil {
+		return len(z.full.scores)
+	}
+	return z.count
+}
 
 // Add sets member's score and reports whether the member is new. An existing
-// member's score is updated in place.
+// member's score is updated.
 func (z *ZSet) Add(member []byte, score float64) bool {
+	if z.full != nil {
+		return z.full.add(member, score)
+	}
+	added := z.compactAdd(member, score)
+	if z.max.exceeded(z.count, len(member)) {
+		z.promote()
+	}
+	return added
+}
+
+// Score returns member's score.
+func (z *ZSet) Score(member []byte) (float64, bool) {
+	if z.full != nil {
+		return z.full.score(member)
+	}
+	var sc float64
+	found := false
+	scanZPairs(z.pack, func(m []byte, s float64) bool {
+		if bytes.Equal(m, member) {
+			sc, found = s, true
+			return false
+		}
+		return true
+	})
+	return sc, found
+}
+
+// Range returns the members between the start and stop ranks, inclusive, in
+// ascending score order, with Redis index semantics.
+func (z *ZSet) Range(start, stop int) []ZMember {
+	lo, hi, ok := normalizeRange(start, stop, z.Len())
+	if !ok {
+		return nil
+	}
+	if z.full != nil {
+		return z.full.rangeByRank(lo, hi)
+	}
+	out := make([]ZMember, 0, hi-lo+1)
+	i := 0
+	scanZPairs(z.pack, func(m []byte, s float64) bool {
+		if i >= lo {
+			out = append(out, ZMember{Member: bytes.Clone(m), Score: s})
+		}
+		i++
+		return i <= hi
+	})
+	return out
+}
+
+// compactAdd rebuilds the packed encoding with member set to score, keeping it
+// ordered. It is O(n) in the number of members, which is bounded by the
+// promotion threshold.
+func (z *ZSet) compactAdd(member []byte, score float64) bool {
+	type entry struct {
+		member []byte
+		score  float64
+	}
+	entries := make([]entry, 0, z.count+1)
+	found := false
+	scanZPairs(z.pack, func(m []byte, s float64) bool {
+		if bytes.Equal(m, member) {
+			found = true
+			entries = append(entries, entry{bytes.Clone(member), score})
+		} else {
+			entries = append(entries, entry{bytes.Clone(m), s})
+		}
+		return true
+	})
+	if !found {
+		entries = append(entries, entry{bytes.Clone(member), score})
+		z.count++
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return zskipLess(entries[i].score, string(entries[i].member), entries[j].score, string(entries[j].member))
+	})
+	rebuilt := make([]byte, 0, len(z.pack)+len(member)+binary.MaxVarintLen64+8)
+	for _, e := range entries {
+		rebuilt = packAppendZ(rebuilt, e.member, e.score)
+	}
+	z.pack = rebuilt
+	return !found
+}
+
+func (z *ZSet) promote() {
+	full := newFullZSet()
+	scanZPairs(z.pack, func(m []byte, s float64) bool {
+		full.add(m, s)
+		return true
+	})
+	z.full = full
+	z.pack = nil
+	z.count = 0
+}
+
+// packAppendZ appends a member element followed by its score as eight raw bytes.
+func packAppendZ(buf, member []byte, score float64) []byte {
+	buf = packAppend(buf, member)
+	var sb [8]byte
+	binary.LittleEndian.PutUint64(sb[:], math.Float64bits(score))
+	return append(buf, sb[:]...)
+}
+
+// scanZPairs walks a pack of member-and-score pairs, calling fn for each. The
+// member slices alias the pack.
+func scanZPairs(buf []byte, fn func(member []byte, score float64) bool) {
+	for len(buf) > 0 {
+		n, w := binary.Uvarint(buf)
+		buf = buf[w:]
+		member := buf[:n]
+		buf = buf[n:]
+		score := math.Float64frombits(binary.LittleEndian.Uint64(buf[:8]))
+		buf = buf[8:]
+		if !fn(member, score) {
+			return
+		}
+	}
+}
+
+// fullZSet is the promoted representation: a member-to-score map for O(1) score
+// lookup, with a skip list that keeps members ordered for range queries.
+type fullZSet struct {
+	scores map[string]float64
+	order  *zskiplist
+}
+
+func newFullZSet() *fullZSet {
+	return &fullZSet{scores: make(map[string]float64), order: newZskiplist()}
+}
+
+func (z *fullZSet) add(member []byte, score float64) bool {
 	m := string(member)
 	if old, ok := z.scores[m]; ok {
 		if old != score {
@@ -54,19 +197,12 @@ func (z *ZSet) Add(member []byte, score float64) bool {
 	return true
 }
 
-// Score returns member's score.
-func (z *ZSet) Score(member []byte) (float64, bool) {
+func (z *fullZSet) score(member []byte) (float64, bool) {
 	s, ok := z.scores[string(member)]
 	return s, ok
 }
 
-// Range returns the members between the start and stop ranks, inclusive, in
-// ascending score order, with Redis index semantics.
-func (z *ZSet) Range(start, stop int) []ZMember {
-	lo, hi, ok := normalizeRange(start, stop, len(z.scores))
-	if !ok {
-		return nil
-	}
+func (z *fullZSet) rangeByRank(lo, hi int) []ZMember {
 	out := make([]ZMember, 0, hi-lo+1)
 	z.order.eachInRank(lo, hi, func(member string, score float64) {
 		out = append(out, ZMember{Member: []byte(member), Score: score})

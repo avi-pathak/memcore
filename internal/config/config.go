@@ -11,6 +11,8 @@ import (
 	"net"
 	"runtime"
 	"strconv"
+
+	"github.com/avinashpathak/memcore/internal/value"
 )
 
 // ErrInvalid is the sentinel that every validation failure wraps, so callers
@@ -21,6 +23,7 @@ var ErrInvalid = errors.New("config: invalid")
 // each field is owned by the subsystem named after its group.
 type Config struct {
 	Network Network
+	Limits  value.Limits
 	Log     Log
 }
 
@@ -42,12 +45,19 @@ type Log struct {
 // host is loopback on purpose: exposing the listener is an explicit operator
 // decision, not a default. Port 6380 avoids colliding with a local Redis.
 func Default() Config {
+	compact := value.Thresholds{MaxEntries: 128, MaxBytes: 64}
 	return Config{
 		Network: Network{
 			Host:      "127.0.0.1",
 			Port:      6380,
 			Databases: 16,
 			Shards:    runtime.GOMAXPROCS(0),
+		},
+		Limits: value.Limits{
+			List: compact,
+			Hash: compact,
+			Set:  compact,
+			ZSet: compact,
 		},
 		Log: Log{
 			Level:  slog.LevelInfo,
@@ -70,6 +80,11 @@ func (c Config) Validate() error {
 	}
 	if c.Network.Shards < 1 {
 		return fmt.Errorf("%w: shards must be at least 1, got %d", ErrInvalid, c.Network.Shards)
+	}
+	for _, th := range []value.Thresholds{c.Limits.List, c.Limits.Hash, c.Limits.Set, c.Limits.ZSet} {
+		if th.MaxEntries < 0 || th.MaxBytes < 0 {
+			return fmt.Errorf("%w: compact-encoding thresholds must not be negative", ErrInvalid)
+		}
 	}
 	switch c.Log.Format {
 	case "text", "json":

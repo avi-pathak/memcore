@@ -18,7 +18,7 @@ func assertZMembers(t *testing.T, got []ZMember, want []string) {
 }
 
 func TestZSetAddReportsNewMembers(t *testing.T) {
-	z := NewZSet()
+	z := NewZSet(bigThresholds)
 	if !z.Add([]byte("a"), 1) {
 		t.Fatal("Add of a new member reported it as existing")
 	}
@@ -28,7 +28,7 @@ func TestZSetAddReportsNewMembers(t *testing.T) {
 }
 
 func TestZSetScoreReflectsUpdates(t *testing.T) {
-	z := NewZSet()
+	z := NewZSet(bigThresholds)
 	z.Add([]byte("a"), 1)
 	z.Add([]byte("a"), 5)
 	if s, ok := z.Score([]byte("a")); !ok || s != 5 {
@@ -37,7 +37,7 @@ func TestZSetScoreReflectsUpdates(t *testing.T) {
 }
 
 func TestZSetRangeIsOrderedByScore(t *testing.T) {
-	z := NewZSet()
+	z := NewZSet(bigThresholds)
 	z.Add([]byte("c"), 3)
 	z.Add([]byte("a"), 1)
 	z.Add([]byte("b"), 2)
@@ -45,7 +45,7 @@ func TestZSetRangeIsOrderedByScore(t *testing.T) {
 }
 
 func TestZSetBreaksScoreTiesByMember(t *testing.T) {
-	z := NewZSet()
+	z := NewZSet(bigThresholds)
 	z.Add([]byte("b"), 1)
 	z.Add([]byte("a"), 1)
 	z.Add([]byte("c"), 1)
@@ -53,15 +53,31 @@ func TestZSetBreaksScoreTiesByMember(t *testing.T) {
 }
 
 func TestZSetRangeReflectsAScoreUpdate(t *testing.T) {
-	z := NewZSet()
+	z := NewZSet(bigThresholds)
 	z.Add([]byte("a"), 1)
 	z.Add([]byte("b"), 2)
 	z.Add([]byte("a"), 3) // a now outranks b
 	assertZMembers(t, z.Range(0, -1), []string{"b", "a"})
 }
 
+func TestZSetPromotesPastItsThreshold(t *testing.T) {
+	z := NewZSet(Thresholds{MaxEntries: 3, MaxBytes: 1 << 20})
+	z.Add([]byte("a"), 1)
+	z.Add([]byte("b"), 2)
+	z.Add([]byte("c"), 3)
+	if !z.Compact() {
+		t.Fatal("a sorted set at its threshold should be compact")
+	}
+	z.Add([]byte("d"), 4) // crosses MaxEntries
+	if z.Compact() {
+		t.Fatal("a sorted set past its threshold should have promoted")
+	}
+	assertZMembers(t, z.Range(0, -1), []string{"a", "b", "c", "d"})
+}
+
 func TestZSetStaysSortedAcrossManyInsertions(t *testing.T) {
-	z := NewZSet()
+	// Small thresholds force promotion, so this exercises the skip list.
+	z := NewZSet(smallThresholds)
 	for i := 200; i > 0; i-- { // insert in descending score order
 		z.Add([]byte(fmt.Sprintf("m%03d", i)), float64(i))
 	}

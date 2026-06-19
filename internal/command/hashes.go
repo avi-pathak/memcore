@@ -27,7 +27,7 @@ func cmdHSet(ctx *Context, args [][]byte) resp.Reply {
 		}
 		h = e.Value.Hash()
 	} else {
-		h = value.NewHash()
+		h = value.NewHash(ctx.Limits.Hash)
 	}
 	var added int64
 	for i := 2; i+1 < len(args); i += 2 {

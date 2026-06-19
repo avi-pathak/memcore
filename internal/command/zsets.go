@@ -45,7 +45,7 @@ func cmdZAdd(ctx *Context, args [][]byte) resp.Reply {
 		}
 		z = e.Value.ZSet()
 	} else {
-		z = value.NewZSet()
+		z = value.NewZSet(ctx.Limits.ZSet)
 	}
 	var added int64
 	for _, p := range pairs {
