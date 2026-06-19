@@ -7,6 +7,7 @@ import (
 
 	"github.com/avinashpathak/memcore/internal/command"
 	"github.com/avinashpathak/memcore/internal/resp"
+	"github.com/avinashpathak/memcore/internal/shard"
 )
 
 // conn is one client connection. It runs on a single goroutine and is not
@@ -48,9 +49,9 @@ func (s *Server) serve(c *conn) {
 	}
 }
 
-// execute runs one command under its database lock and recovers from a panic, so
-// a single misbehaving command cannot take down the server. This recovery is the
-// connection boundary the design relies on.
+// execute runs one command under the shard locks it needs and recovers from a
+// panic, so a single misbehaving command cannot take down the server. This
+// recovery is the connection boundary the design relies on.
 func (s *Server) execute(c *conn, args [][]byte) (reply resp.Reply) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -60,10 +61,29 @@ func (s *Server) execute(c *conn, args [][]byte) (reply resp.Reply) {
 		}
 	}()
 
+	cmd, errReply, ok := s.registry.Resolve(args)
+	if !ok {
+		return errReply
+	}
 	db := s.databases[c.session.DB()]
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	return s.registry.Dispatch(c.session, args)
+	unlock := lockShards(db, cmd, args)
+	defer unlock()
+	return cmd.Run(c.session, args)
+}
+
+// lockShards takes the locks a command needs before it runs: every shard for a
+// whole-database command, a shared lock on the touched shards for a read-only
+// command, or an exclusive lock for a write. The returned function releases
+// them.
+func lockShards(db *shard.DB, cmd command.Command, args [][]byte) func() {
+	switch {
+	case cmd.WholeDB():
+		return db.LockAll()
+	case cmd.ReadOnly():
+		return db.RLockKeys(cmd.Keys(args))
+	default:
+		return db.LockKeys(cmd.Keys(args))
+	}
 }
 
 func (s *Server) handleReadError(c *conn, err error, remote string) {

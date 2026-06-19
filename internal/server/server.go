@@ -15,30 +15,20 @@ import (
 	"github.com/avinashpathak/memcore/internal/clock"
 	"github.com/avinashpathak/memcore/internal/command"
 	"github.com/avinashpathak/memcore/internal/config"
-	"github.com/avinashpathak/memcore/internal/keyspace"
 	"github.com/avinashpathak/memcore/internal/resp"
+	"github.com/avinashpathak/memcore/internal/shard"
 )
-
-// database is one logical keyspace guarded by a single lock. A command holds the
-// lock for its whole execution, which keeps read-modify-write commands such as
-// INCR atomic. Stage 6 replaces this single lock with per-shard locks for
-// intra-database parallelism.
-type database struct {
-	mu sync.Mutex
-	ks *keyspace.Keyspace
-}
 
 // Server accepts client connections and serves RESP commands. It is safe for
 // concurrent use: each connection runs on its own goroutine, and the only
-// shared mutable state is the databases, each guarded by its own lock.
+// shared mutable state is the databases, each of which locks its own shards.
 type Server struct {
 	cfg      config.Network
 	clock    clock.Clock
 	log      *slog.Logger
 	registry *command.Registry
 
-	databases []*database
-	keyspaces []*keyspace.Keyspace // the same keyspaces, shared by every connection's session
+	databases []*shard.DB
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -47,15 +37,12 @@ type Server struct {
 	wg       sync.WaitGroup
 }
 
-// New builds a server with cfg.Network.Databases independent databases.
+// New builds a server with cfg.Network.Databases independent databases, each
+// split into cfg.Network.Shards shards.
 func New(cfg config.Config, clk clock.Clock, log *slog.Logger, registry *command.Registry) *Server {
-	n := cfg.Network.Databases
-	dbs := make([]*database, n)
-	kss := make([]*keyspace.Keyspace, n)
+	dbs := make([]*shard.DB, cfg.Network.Databases)
 	for i := range dbs {
-		ks := keyspace.New(clk)
-		dbs[i] = &database{ks: ks}
-		kss[i] = ks
+		dbs[i] = shard.New(cfg.Network.Shards, clk)
 	}
 	return &Server{
 		cfg:       cfg.Network,
@@ -63,7 +50,6 @@ func New(cfg config.Config, clk clock.Clock, log *slog.Logger, registry *command
 		log:       log,
 		registry:  registry,
 		databases: dbs,
-		keyspaces: kss,
 		conns:     make(map[*conn]struct{}),
 	}
 }
@@ -139,7 +125,7 @@ func (s *Server) startConn(nc net.Conn) {
 		nc:      nc,
 		reader:  resp.NewReader(nc),
 		writer:  resp.NewWriter(nc),
-		session: command.NewContext(s.clock, s.keyspaces),
+		session: command.NewContext(s.clock, s.databases),
 	}
 	s.mu.Lock()
 	if s.closing {

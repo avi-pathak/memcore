@@ -8,9 +8,9 @@ import (
 
 func serverCommands() []Command {
 	return []Command{
-		newCommand("ping", -1, cmdPing),
-		newCommand("select", 2, cmdSelect),
-		newCommand("flushdb", -1, cmdFlushDB),
+		plain("ping", -1, cmdPing),
+		plain("select", 2, cmdSelect),
+		wholeDB("flushdb", -1, cmdFlushDB),
 	}
 }
 

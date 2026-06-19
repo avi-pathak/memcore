@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"runtime"
 	"strconv"
 )
 
@@ -28,6 +29,7 @@ type Network struct {
 	Host      string
 	Port      int
 	Databases int
+	Shards    int // shards per database; each shard is locked independently
 }
 
 // Log holds structured-logging settings.
@@ -45,6 +47,7 @@ func Default() Config {
 			Host:      "127.0.0.1",
 			Port:      6380,
 			Databases: 16,
+			Shards:    runtime.GOMAXPROCS(0),
 		},
 		Log: Log{
 			Level:  slog.LevelInfo,
@@ -64,6 +67,9 @@ func (c Config) Validate() error {
 	}
 	if c.Network.Databases < 1 {
 		return fmt.Errorf("%w: databases must be at least 1, got %d", ErrInvalid, c.Network.Databases)
+	}
+	if c.Network.Shards < 1 {
+		return fmt.Errorf("%w: shards must be at least 1, got %d", ErrInvalid, c.Network.Shards)
 	}
 	switch c.Log.Format {
 	case "text", "json":

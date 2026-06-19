@@ -9,8 +9,8 @@ import (
 	"errors"
 
 	"github.com/avinashpathak/memcore/internal/clock"
-	"github.com/avinashpathak/memcore/internal/keyspace"
 	"github.com/avinashpathak/memcore/internal/resp"
+	"github.com/avinashpathak/memcore/internal/shard"
 )
 
 var errDBOutOfRange = errors.New("database index out of range")
@@ -25,15 +25,15 @@ var errDBOutOfRange = errors.New("database index out of range")
 // and write Keyspace without locking. Keyspace always refers to databases[index]
 // and is kept in step by Select.
 type Context struct {
-	Keyspace *keyspace.Keyspace // the selected database
+	Keyspace *shard.DB // the selected database
 	Clock    clock.Clock
 
-	databases []*keyspace.Keyspace
+	databases []*shard.DB
 	index     int
 }
 
 // NewContext returns a session over databases positioned at database 0.
-func NewContext(clk clock.Clock, databases []*keyspace.Keyspace) *Context {
+func NewContext(clk clock.Clock, databases []*shard.DB) *Context {
 	c := &Context{Clock: clk, databases: databases}
 	if len(databases) > 0 {
 		c.Keyspace = databases[0]
@@ -60,12 +60,17 @@ func (c *Context) Select(index int) error {
 // Redis documentation.
 type Handler func(ctx *Context, args [][]byte) resp.Reply
 
-// Command is one entry in the command table: a name, an arity rule, and the
-// handler that runs it.
+// Command is one entry in the command table: its name, arity rule, handler, and
+// the metadata the executor uses to lock the right shards before running it.
 type Command struct {
-	name  string
-	arity int
-	run   Handler
+	name     string
+	arity    int
+	run      Handler
+	readOnly bool
+	wholeDB  bool
+	firstKey int // index of the first key argument; 0 means the command takes no keys
+	lastKey  int // index of the last key argument; negative counts back from the end
+	keyStep  int // stride between key arguments
 }
 
 // Name returns the command's lowercase name.
@@ -75,6 +80,41 @@ func (c Command) Name() string { return c.name }
 // non-negative arity requires exactly that many elements; a negative arity n
 // requires at least -n. This mirrors the Redis command table.
 func (c Command) Arity() int { return c.arity }
+
+// ReadOnly reports whether the command only reads, so the executor can take a
+// shared lock on its shards.
+func (c Command) ReadOnly() bool { return c.readOnly }
+
+// WholeDB reports whether the command operates on the entire database, so the
+// executor locks every shard.
+func (c Command) WholeDB() bool { return c.wholeDB }
+
+// Run executes the command against ctx.
+func (c Command) Run(ctx *Context, args [][]byte) resp.Reply { return c.run(ctx, args) }
+
+// Keys returns the key arguments the command touches, which the executor hashes
+// to decide which shards to lock. It returns nil for commands that take no keys
+// or that span the whole database.
+func (c Command) Keys(args [][]byte) [][]byte {
+	if c.firstKey == 0 || c.wholeDB {
+		return nil
+	}
+	last := c.lastKey
+	if last < 0 {
+		last = len(args) + last
+	}
+	if last >= len(args) {
+		last = len(args) - 1
+	}
+	if c.firstKey > last {
+		return nil
+	}
+	keys := make([][]byte, 0, (last-c.firstKey)/c.keyStep+1)
+	for i := c.firstKey; i <= last; i += c.keyStep {
+		keys = append(keys, args[i])
+	}
+	return keys
+}
 
 // accepts reports whether an argument count of n satisfies the arity rule.
 func (c Command) accepts(n int) bool {
@@ -91,6 +131,31 @@ const (
 	msgNotInteger = "ERR value is not an integer or out of range"
 )
 
-func newCommand(name string, arity int, run Handler) Command {
+// Command constructors. The name encodes the lock scope so a command table reads
+// as a specification: plain commands touch no keys; readKey and writeKey touch a
+// single key at argument 1; readKeys and writeKeys touch every argument from 1
+// onward; wholeDB commands lock the entire database.
+
+func plain(name string, arity int, run Handler) Command {
 	return Command{name: name, arity: arity, run: run}
+}
+
+func readKey(name string, arity int, run Handler) Command {
+	return Command{name: name, arity: arity, run: run, readOnly: true, firstKey: 1, lastKey: 1, keyStep: 1}
+}
+
+func writeKey(name string, arity int, run Handler) Command {
+	return Command{name: name, arity: arity, run: run, firstKey: 1, lastKey: 1, keyStep: 1}
+}
+
+func readKeys(name string, arity int, run Handler) Command {
+	return Command{name: name, arity: arity, run: run, readOnly: true, firstKey: 1, lastKey: -1, keyStep: 1}
+}
+
+func writeKeys(name string, arity int, run Handler) Command {
+	return Command{name: name, arity: arity, run: run, firstKey: 1, lastKey: -1, keyStep: 1}
+}
+
+func wholeDB(name string, arity int, run Handler) Command {
+	return Command{name: name, arity: arity, run: run, wholeDB: true}
 }

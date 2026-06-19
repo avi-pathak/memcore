@@ -9,15 +9,15 @@ import (
 
 func keyCommands() []Command {
 	return []Command{
-		newCommand("del", -2, cmdDel),
+		writeKeys("del", -2, cmdDel),
 		// UNLINK shares DEL's semantics. Asynchronous freeing of large values is
 		// an internal optimization added later; it does not change the reply.
-		newCommand("unlink", -2, cmdDel),
-		newCommand("exists", -2, cmdExists),
-		newCommand("expire", 3, cmdExpire),
-		newCommand("ttl", 2, cmdTTL),
-		newCommand("persist", 2, cmdPersist),
-		newCommand("type", 2, cmdType),
+		writeKeys("unlink", -2, cmdDel),
+		readKeys("exists", -2, cmdExists),
+		writeKey("expire", 3, cmdExpire),
+		readKey("ttl", 2, cmdTTL),
+		writeKey("persist", 2, cmdPersist),
+		readKey("type", 2, cmdType),
 	}
 }
 

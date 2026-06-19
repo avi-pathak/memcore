@@ -56,14 +56,31 @@ func TestAnExpiredKeyIsReportedAbsent(t *testing.T) {
 	}
 }
 
-func TestLazyExpiryReclaimsTheEntry(t *testing.T) {
+func TestReadsDoNotReclaimExpiredEntries(t *testing.T) {
 	ks, clk := newTestKeyspace()
 	ks.Set("k", value.MakeString([]byte("v")))
 	ks.SetExpire("k", clk.Now().Add(10*time.Second))
 	clk.Advance(11 * time.Second)
-	ks.Get("k") // observing the key triggers reclamation
+	if _, ok := ks.Get("k"); ok {
+		t.Fatal("expired key was visible to a read")
+	}
+	// Reads hide an expired entry but leave reclamation to writes and active
+	// expiry, so the entry is still counted until then.
+	if n := ks.Len(); n != 1 {
+		t.Fatalf("Len = %d, want 1; a read must not reclaim", n)
+	}
+}
+
+func TestDeletingAnExpiredKeyReportsItAbsentAndReclaimsIt(t *testing.T) {
+	ks, clk := newTestKeyspace()
+	ks.Set("k", value.MakeString([]byte("v")))
+	ks.SetExpire("k", clk.Now().Add(10*time.Second))
+	clk.Advance(11 * time.Second)
+	if ks.Delete("k") {
+		t.Fatal("Delete reported an expired key as live")
+	}
 	if n := ks.Len(); n != 0 {
-		t.Fatalf("Len = %d, want 0 after lazy expiry", n)
+		t.Fatalf("Len = %d, want 0; Delete must reclaim the entry", n)
 	}
 }
 

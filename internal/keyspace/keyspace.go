@@ -1,8 +1,7 @@
-// Package keyspace holds the per-database key space and applies lazy expiry.
+// Package keyspace holds the key space for one shard of a logical database.
 //
-// A Keyspace is a plain data structure with no locks of its own. The shard that
-// owns it serializes every call, so a read that evicts an expired entry is
-// safe.
+// A Keyspace is a plain data structure with no locks of its own; the shard that
+// owns it provides synchronization.
 package keyspace
 
 import (
@@ -12,12 +11,13 @@ import (
 	"github.com/avinashpathak/memcore/internal/value"
 )
 
-// Keyspace owns the key-to-entry map for a single logical database. It is not
-// safe for concurrent use; the owning shard provides synchronization.
+// Keyspace owns the key-to-entry map for one shard of a logical database. It is
+// not safe for concurrent use; the owning shard provides synchronization.
 //
-// Expiry is lazy: a read that observes an entry past its deadline removes it and
-// reports the key as absent. Because such a read mutates the map, the shard must
-// hold its exclusive lock even for read commands.
+// Reads (Get, Lookup, Exists) do not modify the map, so a shard may serve them
+// under a shared read lock. An expired entry is hidden from reads but reclaimed
+// only by a write or by active expiry. Writes mutate the map and run under the
+// shard's exclusive lock.
 type Keyspace struct {
 	clock   clock.Clock
 	entries map[string]Entry
@@ -28,26 +28,24 @@ func New(clk clock.Clock) *Keyspace {
 	return &Keyspace{clock: clk, entries: make(map[string]Entry)}
 }
 
-// live returns the entry for key when it is present and unexpired, evicting it
-// lazily otherwise.
-func (k *Keyspace) live(key string) (Entry, bool) {
+// peek returns the entry for key when present and unexpired. It does not modify
+// the map: an expired entry is reported absent but left in place, to be
+// reclaimed by a write or by active expiry. That is what lets reads run under a
+// shared lock.
+func (k *Keyspace) peek(key string) (Entry, bool) {
 	e, ok := k.entries[key]
-	if !ok {
-		return Entry{}, false
-	}
-	if e.expired(k.clock.Now()) {
-		delete(k.entries, key)
+	if !ok || e.expired(k.clock.Now()) {
 		return Entry{}, false
 	}
 	return e, true
 }
 
 // Lookup returns the live entry for key.
-func (k *Keyspace) Lookup(key string) (Entry, bool) { return k.live(key) }
+func (k *Keyspace) Lookup(key string) (Entry, bool) { return k.peek(key) }
 
 // Get returns the live value for key.
 func (k *Keyspace) Get(key string) (value.Value, bool) {
-	e, ok := k.live(key)
+	e, ok := k.peek(key)
 	if !ok {
 		return value.Value{}, false
 	}
@@ -56,7 +54,7 @@ func (k *Keyspace) Get(key string) (value.Value, bool) {
 
 // Exists reports whether key is present and unexpired.
 func (k *Keyspace) Exists(key string) bool {
-	_, ok := k.live(key)
+	_, ok := k.peek(key)
 	return ok
 }
 
@@ -76,7 +74,7 @@ func (k *Keyspace) SetEntry(key string, e Entry) {
 // SetExpire attaches the deadline at to an existing key and reports whether the
 // key was present.
 func (k *Keyspace) SetExpire(key string, at time.Time) bool {
-	e, ok := k.live(key)
+	e, ok := k.peek(key)
 	if !ok {
 		return false
 	}
@@ -87,7 +85,7 @@ func (k *Keyspace) SetExpire(key string, at time.Time) bool {
 
 // Persist removes any TTL from key and reports whether a TTL was cleared.
 func (k *Keyspace) Persist(key string) bool {
-	e, ok := k.live(key)
+	e, ok := k.peek(key)
 	if !ok || !e.HasExpiry() {
 		return false
 	}
@@ -96,13 +94,15 @@ func (k *Keyspace) Persist(key string) bool {
 	return true
 }
 
-// Delete removes key and reports whether it was present beforehand.
+// Delete removes key and reports whether it was live beforehand. An expired
+// entry is removed too, but reported as absent.
 func (k *Keyspace) Delete(key string) bool {
-	if _, ok := k.live(key); !ok {
+	e, ok := k.entries[key]
+	if !ok {
 		return false
 	}
 	delete(k.entries, key)
-	return true
+	return !e.expired(k.clock.Now())
 }
 
 // Len reports the number of stored entries, including any that have expired but

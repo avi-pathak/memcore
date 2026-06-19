@@ -39,20 +39,31 @@ func (r *Registry) Lookup(name string) (Command, bool) {
 	return c, ok
 }
 
-// Dispatch resolves the command named by args[0], validates its arity, and runs
-// it. Unknown commands and arity violations come back as RESP error replies.
-// The name is matched case-insensitively.
-func (r *Registry) Dispatch(ctx *Context, args [][]byte) resp.Reply {
+// Resolve looks up the command named by args[0] and validates its arity. On
+// success it returns the command; otherwise it returns the RESP error reply to
+// send back. The server uses Resolve so it can lock the command's shards between
+// resolution and execution.
+func (r *Registry) Resolve(args [][]byte) (Command, resp.Reply, bool) {
 	if len(args) == 0 {
-		return resp.Error("ERR empty command")
+		return Command{}, resp.Error("ERR empty command"), false
 	}
 	name := strings.ToLower(string(args[0]))
 	cmd, ok := r.commands[name]
 	if !ok {
-		return resp.Errorf("ERR unknown command '%s'", args[0])
+		return Command{}, resp.Errorf("ERR unknown command '%s'", args[0]), false
 	}
 	if !cmd.accepts(len(args)) {
-		return resp.Errorf("ERR wrong number of arguments for '%s' command", cmd.name)
+		return Command{}, resp.Errorf("ERR wrong number of arguments for '%s' command", cmd.name), false
+	}
+	return cmd, resp.Reply{}, true
+}
+
+// Dispatch resolves and runs a command without external locking. The server
+// wraps Run in shard locking; tests use Dispatch directly.
+func (r *Registry) Dispatch(ctx *Context, args [][]byte) resp.Reply {
+	cmd, errReply, ok := r.Resolve(args)
+	if !ok {
+		return errReply
 	}
 	return cmd.run(ctx, args)
 }

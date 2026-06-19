@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"github.com/avinashpathak/memcore/internal/clock"
-	"github.com/avinashpathak/memcore/internal/keyspace"
 	"github.com/avinashpathak/memcore/internal/resp"
+	"github.com/avinashpathak/memcore/internal/shard"
 )
 
 func newTestEnv() (*Registry, *Context, *clock.ManualClock) {
@@ -15,9 +15,9 @@ func newTestEnv() (*Registry, *Context, *clock.ManualClock) {
 
 func newTestEnvN(databases int) (*Registry, *Context, *clock.ManualClock) {
 	clk := clock.NewManualClock(time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC))
-	dbs := make([]*keyspace.Keyspace, databases)
+	dbs := make([]*shard.DB, databases)
 	for i := range dbs {
-		dbs[i] = keyspace.New(clk)
+		dbs[i] = shard.New(4, clk)
 	}
 	return NewRegistry(), NewContext(clk, dbs), clk
 }

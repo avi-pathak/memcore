@@ -10,10 +10,10 @@ import (
 
 func stringCommands() []Command {
 	return []Command{
-		newCommand("get", 2, cmdGet),
-		newCommand("set", 3, cmdSet),
-		newCommand("incr", 2, cmdIncr),
-		newCommand("decr", 2, cmdDecr),
+		readKey("get", 2, cmdGet),
+		writeKey("set", 3, cmdSet),
+		writeKey("incr", 2, cmdIncr),
+		writeKey("decr", 2, cmdDecr),
 	}
 }
 

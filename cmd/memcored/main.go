@@ -39,6 +39,7 @@ func run() error {
 	flag.StringVar(&cfg.Network.Host, "host", cfg.Network.Host, "address to bind the listener")
 	flag.IntVar(&cfg.Network.Port, "port", cfg.Network.Port, "port to listen on")
 	flag.IntVar(&cfg.Network.Databases, "databases", cfg.Network.Databases, "number of logical databases")
+	flag.IntVar(&cfg.Network.Shards, "shards", cfg.Network.Shards, "shards per database (default GOMAXPROCS)")
 	flag.StringVar(&cfg.Log.Format, "log-format", cfg.Log.Format, "log format: text or json")
 	flag.StringVar(&logLevel, "log-level", logLevel, "log level: debug, info, warn, error")
 	flag.Parse()
