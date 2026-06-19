@@ -72,6 +72,11 @@ func Array(elems []Reply) Reply { return Reply{kind: replyArray, array: elems} }
 // IsError reports whether the reply is an error reply.
 func (r Reply) IsError() bool { return r.kind == replyError }
 
+// Elements returns the sub-replies of an array reply, or nil for any other
+// kind. It lets callers inspect an array reply whose element order is not
+// specified, such as HGETALL or SMEMBERS.
+func (r Reply) Elements() []Reply { return r.array }
+
 // Equal reports whether two replies are structurally equal. Empty and nil byte
 // payloads compare equal.
 func (r Reply) Equal(o Reply) bool {

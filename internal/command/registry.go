@@ -18,6 +18,10 @@ func NewRegistry() *Registry {
 	r := &Registry{commands: make(map[string]Command)}
 	r.register(stringCommands())
 	r.register(keyCommands())
+	r.register(listCommands())
+	r.register(hashCommands())
+	r.register(setCommands())
+	r.register(zsetCommands())
 	r.register(serverCommands())
 	return r
 }

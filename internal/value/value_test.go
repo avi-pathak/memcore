@@ -13,15 +13,15 @@ func TestMakeStringStoresADefensiveCopy(t *testing.T) {
 
 func TestKindReportsStringForAStringValue(t *testing.T) {
 	v := MakeString([]byte("x"))
-	if v.Kind() != String {
-		t.Fatalf("Kind = %v, want String", v.Kind())
+	if v.Kind() != KindString {
+		t.Fatalf("Kind = %v, want KindString", v.Kind())
 	}
 }
 
 func TestZeroValueHasKindNone(t *testing.T) {
 	var v Value
-	if v.Kind() != None {
-		t.Fatalf("Kind = %v, want None", v.Kind())
+	if v.Kind() != KindNone {
+		t.Fatalf("Kind = %v, want KindNone", v.Kind())
 	}
 }
 
@@ -40,8 +40,12 @@ func TestKindNamesMatchTheWireProtocol(t *testing.T) {
 		kind Kind
 		want string
 	}{
-		{None, "none"},
-		{String, "string"},
+		{KindNone, "none"},
+		{KindString, "string"},
+		{KindList, "list"},
+		{KindHash, "hash"},
+		{KindSet, "set"},
+		{KindZSet, "zset"},
 		{Kind(99), "unknown"},
 	}
 	for _, tt := range tests {

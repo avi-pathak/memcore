@@ -22,7 +22,7 @@ func cmdGet(ctx *Context, args [][]byte) resp.Reply {
 	if !ok {
 		return resp.Nil()
 	}
-	if v.Kind() != value.String {
+	if v.Kind() != value.KindString {
 		return resp.Error(msgWrongType)
 	}
 	return resp.Bulk(v.Str())
@@ -42,7 +42,7 @@ func incrBy(ctx *Context, key string, delta int64) resp.Reply {
 	e, ok := ctx.Keyspace.Lookup(key)
 	var cur int64
 	if ok {
-		if e.Value.Kind() != value.String {
+		if e.Value.Kind() != value.KindString {
 			return resp.Error(msgWrongType)
 		}
 		n, err := strconv.ParseInt(string(e.Value.Str()), 10, 64)
