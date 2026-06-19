@@ -1,0 +1,8 @@
+# Keep line endings deterministic across platforms. Go tooling expects LF.
+* text=auto eol=lf
+*.go text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+*.sh text eol=lf

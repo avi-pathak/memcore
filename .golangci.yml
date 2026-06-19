@@ -1,0 +1,51 @@
+# Linter configuration for golangci-lint v1.
+# The intent is to encode the project's code-character rules that a machine can
+# check: formatting, vet correctness, unused code, naming, and doc-comment
+# conventions on exported identifiers.
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - misspell
+    - revive
+    - unconvert
+    - prealloc
+    - gofmt
+
+linters-settings:
+  govet:
+    enable-all: true
+    disable:
+      # Field alignment is noise here; readable struct order beats packing.
+      - fieldalignment
+  misspell:
+    locale: US
+  revive:
+    rules:
+      - name: exported
+      - name: package-comments
+      - name: var-naming
+      - name: error-strings
+      - name: error-naming
+      - name: error-return
+      - name: receiver-naming
+      - name: indent-error-flow
+      - name: range
+      - name: unreachable-code
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - prealloc

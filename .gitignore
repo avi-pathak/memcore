@@ -1,0 +1,19 @@
+# Build artifacts
+/memcored
+/memcored.exe
+/dist/
+/bin/
+
+# Local runtime data written by the persistence layer
+/data/
+
+# Test, benchmark, and coverage output
+*.test
+*.out
+*.prof
+coverage.*
+
+# Editor and OS noise
+.DS_Store
+.idea/
+*.swp
