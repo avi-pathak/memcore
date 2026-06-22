@@ -1,10 +1,13 @@
 package command
 
 import (
-	"strings"
-
 	"github.com/avinashpathak/memcore/internal/resp"
 )
+
+// maxCommandNameLen bounds the stack buffer used for case-insensitive command
+// lookup. The longest built-in name is well under this, so a longer token is
+// simply not a known command.
+const maxCommandNameLen = 32
 
 // Registry is the command table: the single source of truth for which commands
 // exist. It is built once at boot and is read-only afterward, so it needs no
@@ -43,6 +46,26 @@ func (r *Registry) Lookup(name string) (Command, bool) {
 	return c, ok
 }
 
+// lookupFold finds a command by name case-insensitively without allocating.
+// Command names are short ASCII, so the lowercased form fits in a stack buffer,
+// and indexing the map with string(buf[:n]) is special-cased by the compiler to
+// avoid a heap allocation. This runs on every command, so the allocation it
+// saves matters.
+func (r *Registry) lookupFold(name []byte) (Command, bool) {
+	if len(name) == 0 || len(name) > maxCommandNameLen {
+		return Command{}, false
+	}
+	var buf [maxCommandNameLen]byte
+	for i, b := range name {
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		buf[i] = b
+	}
+	c, ok := r.commands[string(buf[:len(name)])]
+	return c, ok
+}
+
 // Resolve looks up the command named by args[0] and validates its arity. On
 // success it returns the command; otherwise it returns the RESP error reply to
 // send back. The server uses Resolve so it can lock the command's shards between
@@ -51,8 +74,7 @@ func (r *Registry) Resolve(args [][]byte) (Command, resp.Reply, bool) {
 	if len(args) == 0 {
 		return Command{}, resp.Error("ERR empty command"), false
 	}
-	name := strings.ToLower(string(args[0]))
-	cmd, ok := r.commands[name]
+	cmd, ok := r.lookupFold(args[0])
 	if !ok {
 		return Command{}, resp.Errorf("ERR unknown command '%s'", args[0]), false
 	}

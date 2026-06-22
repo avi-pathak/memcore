@@ -1,0 +1,16 @@
+{
+  "name": "@memcore/client",
+  "version": "0.1.0",
+  "description": "Minimal zero-dependency Memcore (RESP2) client.",
+  "type": "module",
+  "main": "memcore.mjs",
+  "exports": "./memcore.mjs",
+  "files": ["memcore.mjs"],
+  "engines": {
+    "node": ">=16"
+  },
+  "scripts": {
+    "example": "node example.mjs"
+  },
+  "license": "MIT"
+}

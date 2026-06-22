@@ -79,7 +79,11 @@ func Default() Config {
 			Host:      "127.0.0.1",
 			Port:      6380,
 			Databases: 16,
-			Shards:    runtime.GOMAXPROCS(0),
+			// Shards exceed the core count on purpose: a key maps to a shard by
+			// hash, and overprovisioning shards lowers the chance two cores take
+			// the same shard's read lock at once, which is where short read
+			// critical sections lose scalability. Each empty shard is cheap.
+			Shards: defaultShards(),
 		},
 		Limits: value.Limits{
 			List: compact,
@@ -108,6 +112,22 @@ func Default() Config {
 			Format: "text",
 		},
 	}
+}
+
+// defaultShards picks a shard count from the available parallelism. The factor
+// over GOMAXPROCS reduces the chance that two cores contend on one shard's read
+// lock; it is capped so a very large core count does not create an unreasonable
+// number of shards. Operators can override it with -shards.
+func defaultShards() int {
+	const factor, maxShards = 16, 1024
+	n := runtime.GOMAXPROCS(0) * factor
+	if n > maxShards {
+		n = maxShards
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
 }
 
 // Validate reports the first invariant the configuration violates. Every

@@ -45,7 +45,7 @@ func run() error {
 	flag.StringVar(&cfg.Network.Host, "host", cfg.Network.Host, "address to bind the listener")
 	flag.IntVar(&cfg.Network.Port, "port", cfg.Network.Port, "port to listen on")
 	flag.IntVar(&cfg.Network.Databases, "databases", cfg.Network.Databases, "number of logical databases")
-	flag.IntVar(&cfg.Network.Shards, "shards", cfg.Network.Shards, "shards per database (default GOMAXPROCS)")
+	flag.IntVar(&cfg.Network.Shards, "shards", cfg.Network.Shards, "shards per database (default scales with GOMAXPROCS)")
 	flag.BoolVar(&cfg.Persistence.Enabled, "persistence", cfg.Persistence.Enabled, "enable on-disk persistence")
 	flag.StringVar(&cfg.Persistence.Dir, "data-dir", cfg.Persistence.Dir, "directory for the snapshot and append log")
 	flag.StringVar(&cfg.Persistence.FSync, "fsync", cfg.Persistence.FSync, "append-log fsync policy: always, everysec, or no")

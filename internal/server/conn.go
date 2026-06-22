@@ -5,7 +5,6 @@ import (
 	"io"
 	"net"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/avinashpathak/memcore/internal/clock"
@@ -57,64 +56,91 @@ func (s *Server) serve(c *conn) {
 	}
 }
 
-// dispatch times one command, records its metrics, and logs it when it crosses
-// the slow-command threshold. The measurement spans lock acquisition and
-// execution, which is what an operator cares about.
+// dispatch resolves a command, runs it, and -- only when metrics or the slow
+// log are active -- times it. With both off, the default, dispatch reads the
+// clock zero times and computes no command-name string beyond the resolved one.
 func (s *Server) dispatch(c *conn, args [][]byte) resp.Reply {
-	start := s.clock.Now()
-	reply := s.execute(c, args)
-	elapsed := s.clock.Now().Sub(start)
-
-	name := commandName(args)
-	if s.metrics != nil {
-		s.metrics.ObserveCommand(name, elapsed, reply.IsError())
-	}
-	s.maybeLogSlow(c, name, args, elapsed)
-	return reply
-}
-
-func (s *Server) maybeLogSlow(c *conn, name string, args [][]byte, elapsed time.Duration) {
-	r := c.session.Settings.Load()
-	if !r.SlowLogEnabled || r.SlowThreshold <= 0 || elapsed < r.SlowThreshold {
-		return
-	}
-	s.log.Warn("slow command",
-		"command", name,
-		"args", len(args)-1,
-		"duration", elapsed,
-		"db", c.session.DB(),
-	)
-}
-
-func commandName(args [][]byte) string {
-	if len(args) == 0 {
-		return ""
-	}
-	return strings.ToLower(string(args[0]))
-}
-
-// execute runs one command under the shard locks it needs and recovers from a
-// panic, so a single misbehaving command cannot take down the server. This
-// recovery is the connection boundary the design relies on.
-func (s *Server) execute(c *conn, args [][]byte) (reply resp.Reply) {
-	defer func() {
-		if r := recover(); r != nil {
-			s.log.Error("recovered from panic during command execution",
-				"command", string(args[0]), "panic", r)
-			reply = resp.Error("ERR internal server error")
-		}
-	}()
-
 	cmd, errReply, ok := s.registry.Resolve(args)
 	if !ok {
 		return errReply
 	}
+
+	rc := c.session.Settings.Load()
+	slow := rc.SlowLogEnabled && rc.SlowThreshold > 0
+	timed := s.metrics != nil || slow
+	if !timed {
+		return s.execute(c, cmd, args)
+	}
+
+	start := s.clock.Now()
+	reply := s.execute(c, cmd, args)
+	elapsed := s.clock.Now().Sub(start)
+
+	if s.metrics != nil {
+		s.metrics.ObserveCommand(cmd.Name(), elapsed, reply.IsError())
+	}
+	if slow && elapsed >= rc.SlowThreshold {
+		s.log.Warn("slow command",
+			"command", cmd.Name(),
+			"args", len(args)-1,
+			"duration", elapsed,
+			"db", c.session.DB(),
+		)
+	}
+	return reply
+}
+
+// execute runs an already-resolved command under the shard locks it needs and
+// recovers from a panic, so a single misbehaving command cannot take down the
+// server. This recovery is the connection boundary the design relies on.
+func (s *Server) execute(c *conn, cmd command.Command, args [][]byte) (reply resp.Reply) {
 	db := s.databases[c.session.DB()]
+
+	// Fast path: a single-key command locks exactly one shard. Locking by index
+	// and releasing through an in-place deferred call avoids both the key/index
+	// slices and the returned-closure heap allocation the general path incurs,
+	// so the hot path allocates nothing for locking. The defer still releases the
+	// shard on a panic before recover turns it into an error reply.
+	if cmd.SingleKey() && len(args) > 1 {
+		write := !cmd.ReadOnly()
+		sh := db.ShardOf(args[1])
+		if write {
+			db.LockAt(sh)
+		} else {
+			db.RLockAt(sh)
+		}
+		defer func() {
+			if write {
+				db.UnlockAt(sh)
+			} else {
+				db.RUnlockAt(sh)
+			}
+			if r := recover(); r != nil {
+				s.log.Error("recovered from panic during command execution",
+					"command", cmd.Name(), "panic", r)
+				reply = resp.Error("ERR internal server error")
+			}
+		}()
+		reply = cmd.Run(c.session, args)
+		if write && s.persist != nil && !reply.IsError() {
+			if err := s.persist.Append(c.session.DB(), persistArgs(s.clock, cmd, args)); err != nil {
+				s.log.Error("append-log write failed", "command", cmd.Name(), "error", err)
+			}
+		}
+		return reply
+	}
+
+	// General path: whole-database and multi-key commands.
 	unlock := lockShards(db, cmd, args)
-	defer unlock()
+	defer func() {
+		unlock()
+		if r := recover(); r != nil {
+			s.log.Error("recovered from panic during command execution",
+				"command", cmd.Name(), "panic", r)
+			reply = resp.Error("ERR internal server error")
+		}
+	}()
 	reply = cmd.Run(c.session, args)
-	// Log successful writes under the shard lock, so same-key writes reach the
-	// log in the order they were applied.
 	if s.persist != nil && !cmd.ReadOnly() && !reply.IsError() {
 		if err := s.persist.Append(c.session.DB(), persistArgs(s.clock, cmd, args)); err != nil {
 			s.log.Error("append-log write failed", "command", cmd.Name(), "error", err)
@@ -136,10 +162,11 @@ func persistArgs(clk clock.Clock, cmd command.Command, args [][]byte) [][]byte {
 	return args
 }
 
-// lockShards takes the locks a command needs before it runs: every shard for a
-// whole-database command, a shared lock on the touched shards for a read-only
-// command, or an exclusive lock for a write. The returned function releases
-// them.
+// lockShards takes the locks a whole-database or multi-key command needs: every
+// shard for a whole-database command, a shared lock on the touched shards for a
+// read-only command, or an exclusive lock for a write. The single-key case is
+// handled directly in execute without allocating. The returned function releases
+// the locks.
 func lockShards(db *shard.DB, cmd command.Command, args [][]byte) func() {
 	switch {
 	case cmd.WholeDB():

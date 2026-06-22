@@ -96,6 +96,13 @@ func (c Command) WholeDB() bool { return c.wholeDB }
 // Run executes the command against ctx.
 func (c Command) Run(ctx *Context, args [][]byte) resp.Reply { return c.run(ctx, args) }
 
+// SingleKey reports that the command touches exactly one key, at args[1]. This
+// is the common case, and it lets the executor lock one shard without building
+// the slices that the multi-key path needs.
+func (c Command) SingleKey() bool {
+	return c.firstKey == 1 && c.lastKey == 1 && c.keyStep == 1 && !c.wholeDB
+}
+
 // Keys returns the key arguments the command touches, which the executor hashes
 // to decide which shards to lock. It returns nil for commands that take no keys
 // or that span the whole database.

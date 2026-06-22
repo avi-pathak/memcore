@@ -18,7 +18,7 @@ func stringCommands() []Command {
 }
 
 func cmdGet(ctx *Context, args [][]byte) resp.Reply {
-	v, ok := ctx.Keyspace.Get(string(args[1]))
+	v, ok := ctx.Keyspace.GetBytes(args[1])
 	if !ok {
 		return resp.Nil()
 	}

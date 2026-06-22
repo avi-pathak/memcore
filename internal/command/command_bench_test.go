@@ -26,3 +26,17 @@ func BenchmarkGet(b *testing.B) {
 		r.Dispatch(ctx, args)
 	}
 }
+
+// BenchmarkResolve measures command lookup and arity validation in isolation.
+// It runs on every command, so it should not allocate.
+func BenchmarkResolve(b *testing.B) {
+	r := NewRegistry()
+	args := [][]byte{[]byte("GET"), []byte("key")}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, ok := r.Resolve(args); !ok {
+			b.Fatal("resolve failed")
+		}
+	}
+}

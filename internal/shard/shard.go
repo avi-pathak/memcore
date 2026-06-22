@@ -70,6 +70,19 @@ func (db *DB) keyspaceFor(key string) *keyspace.Keyspace {
 // Get returns the live value for key.
 func (db *DB) Get(key string) (value.Value, bool) { return db.keyspaceFor(key).Get(key) }
 
+// GetBytes returns the live value for a key still held as bytes, routing and
+// looking it up without allocating the key string. It is the allocation-free
+// read path the server uses for GET.
+func (db *DB) GetBytes(key []byte) (value.Value, bool) {
+	return db.shards[db.indexBytes(key)].GetBytes(key)
+}
+
+// ExistsBytes reports whether a byte key is present and unexpired, without
+// allocating the key string.
+func (db *DB) ExistsBytes(key []byte) bool {
+	return db.shards[db.indexBytes(key)].ExistsBytes(key)
+}
+
 // Lookup returns the live entry for key.
 func (db *DB) Lookup(key string) (keyspace.Entry, bool) { return db.keyspaceFor(key).Lookup(key) }
 
@@ -137,6 +150,20 @@ func (db *DB) LockKeys(keys [][]byte) func() {
 		}
 	}
 }
+
+// ShardOf returns the index of the shard that owns key. Paired with the LockAt
+// helpers, it lets the single-key fast path lock without allocating the key or
+// shard-index slices the multi-key path builds, and without a returned-closure
+// unlock.
+func (db *DB) ShardOf(key []byte) int { return db.indexBytes(key) }
+
+// LockAt and the related helpers lock one shard by index. The caller is
+// responsible for pairing each lock with its unlock, which the server does with
+// a deferred call so a panic still releases the shard.
+func (db *DB) LockAt(i int)    { db.mus[i].Lock() }
+func (db *DB) UnlockAt(i int)  { db.mus[i].Unlock() }
+func (db *DB) RLockAt(i int)   { db.mus[i].RLock() }
+func (db *DB) RUnlockAt(i int) { db.mus[i].RUnlock() }
 
 // RLockKeys read-locks the shards covering keys, in ascending shard order, and
 // returns a function that releases them. Because reads do not mutate a keyspace,

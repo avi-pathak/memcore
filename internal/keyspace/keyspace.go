@@ -59,6 +59,25 @@ func (k *Keyspace) Get(key string) (value.Value, bool) {
 	return e.Value, true
 }
 
+// GetBytes is Get for a key still held as bytes. Indexing the map with
+// string(key) is special-cased by the compiler to avoid copying the key onto
+// the heap, so a read served straight from the request buffer allocates
+// nothing.
+func (k *Keyspace) GetBytes(key []byte) (value.Value, bool) {
+	e, ok := k.entries[string(key)]
+	if !ok || e.expired(k.clock.Now()) {
+		return value.Value{}, false
+	}
+	return e.Value, true
+}
+
+// ExistsBytes reports whether key is present and unexpired, without allocating
+// the key string.
+func (k *Keyspace) ExistsBytes(key []byte) bool {
+	e, ok := k.entries[string(key)]
+	return ok && !e.expired(k.clock.Now())
+}
+
 // Exists reports whether key is present and unexpired.
 func (k *Keyspace) Exists(key string) bool {
 	_, ok := k.peek(key)

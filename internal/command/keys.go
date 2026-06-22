@@ -45,7 +45,7 @@ func cmdUnlink(ctx *Context, args [][]byte) resp.Reply {
 func cmdExists(ctx *Context, args [][]byte) resp.Reply {
 	var n int64
 	for _, raw := range args[1:] {
-		if ctx.Keyspace.Exists(string(raw)) {
+		if ctx.Keyspace.ExistsBytes(raw) {
 			n++
 		}
 	}
